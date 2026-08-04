@@ -1,10 +1,11 @@
 import type { Config } from './config.js';
-import { resolveEndpoints, isSymbolWatched } from './config.js';
+import { resolveEndpoints, isSymbolWatched, proxyFor } from './config.js';
 import { BinanceRestClient } from './binance/rest.js';
 import { ExchangeInfoCache } from './binance/exchangeInfo.js';
 import { AccountService } from './binance/account.js';
 import { BinanceExecutor } from './binance/executor.js';
 import { UserDataStream } from './binance/userDataStream.js';
+import { createRestProxyDispatcher, createWsProxyAgent, parseProxy } from './binance/proxy.js';
 import {
   isFillEvent,
   toFillEvent,
@@ -33,11 +34,14 @@ export class App {
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private hedgeMode = false;
+  private readonly restProxyLabel: string | undefined;
   /** Счётчики событий по типам — чтобы было видно, что поток вообще живой. */
   private readonly eventCounts = new Map<string, number>();
 
   constructor(private readonly deps: AppDeps) {
     const endpoints = resolveEndpoints(deps.cfg);
+    const restProxy = parseProxy(proxyFor(deps.cfg, 'rest'));
+    this.restProxyLabel = restProxy?.url;
     this.rest = new BinanceRestClient({
       baseUrl: endpoints.rest,
       apiKey: deps.cfg.apiKey,
@@ -46,6 +50,7 @@ export class App {
       timeoutMs: deps.cfg.httpTimeoutMs,
       allowHttp2: deps.cfg.allowHttp2,
       logger: deps.logger.child({ mod: 'rest' }),
+      ...(restProxy ? { dispatcher: createRestProxyDispatcher(restProxy) } : {}),
     });
     this.exchangeInfo = new ExchangeInfoCache(this.rest, {
       logger: deps.logger.child({ mod: 'exchangeInfo' }),
@@ -67,6 +72,10 @@ export class App {
       testnet: cfg.testnet,
       rest: endpoints.rest,
       ws: endpoints.ws,
+      прокси: {
+        rest: this.restProxyLabel ?? 'напрямую',
+        ws: proxyFor(cfg, 'ws') ?? 'напрямую',
+      },
       reactionMode: cfg.reactionMode,
       dryRun: cfg.dryRun,
       lossThresholdPct: cfg.lossThresholdPct,
@@ -107,11 +116,13 @@ export class App {
 
     await this.bootstrapState(snapshot.positions, snapshot.openOrders, true);
 
+    const wsAgent = createWsProxyAgent(parseProxy(proxyFor(cfg, 'ws')));
     this.stream = new UserDataStream({
       rest: this.rest,
       wsBaseUrl: endpoints.ws,
       keepAliveMs: cfg.listenKeyKeepAliveMs,
       logger: logger.child({ mod: 'ws' }),
+      ...(wsAgent ? { wsAgent } : {}),
       onEvent: (evt) => this.handleEvent(evt),
       onConnected: (attempt) => {
         if (attempt > 0 || this.engine) void this.reconcile('после подключения');

@@ -5,7 +5,8 @@
  * рвётся связь — время ответа, размер тела, коды ошибок Binance.
  */
 import 'dotenv/config';
-import { loadConfigFromEnv, resolveEndpoints } from './config.js';
+import { loadConfigFromEnv, resolveEndpoints, proxyFor } from './config.js';
+import { createRestProxyDispatcher, createWsProxyAgent, parseProxy } from './binance/proxy.js';
 import { BinanceRestClient } from './binance/rest.js';
 import { AccountService } from './binance/account.js';
 import { ExchangeInfoCache } from './binance/exchangeInfo.js';
@@ -27,12 +28,13 @@ function waitForFrames(
   url: string,
   timeoutMs: number,
   needMessages: number,
+  agent?: import('node:http').Agent,
 ): Promise<{ opened: boolean; messages: number; waitedMs: number }> {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     let opened = false;
     let messages = 0;
-    const ws = new WebSocket(url);
+    const ws = agent ? new WebSocket(url, { agent }) : new WebSocket(url);
 
     const finish = (err?: Error) => {
       clearTimeout(timer);
@@ -89,8 +91,11 @@ async function main(): Promise<void> {
   process.stdout.write(`  REST: ${endpoints.rest}\n`);
   process.stdout.write(`  WS:   ${endpoints.ws}\n`);
   process.stdout.write(`  HTTP/2: ${cfg.allowHttp2 ? 'разрешён' : 'выключен (HTTP/1.1)'}\n`);
-  process.stdout.write(`  Таймаут запроса: ${cfg.httpTimeoutMs} мс\n\n`);
+  process.stdout.write(`  Таймаут запроса: ${cfg.httpTimeoutMs} мс\n`);
+  process.stdout.write(`  Прокси REST: ${proxyFor(cfg, 'rest') ?? 'напрямую'}\n`);
+  process.stdout.write(`  Прокси WS:   ${proxyFor(cfg, 'ws') ?? 'напрямую'}\n\n`);
 
+  const restProxy = parseProxy(proxyFor(cfg, 'rest'));
   const rest = new BinanceRestClient({
     baseUrl: endpoints.rest,
     apiKey: cfg.apiKey,
@@ -99,6 +104,7 @@ async function main(): Promise<void> {
     timeoutMs: cfg.httpTimeoutMs,
     allowHttp2: cfg.allowHttp2,
     logger,
+    ...(restProxy ? { dispatcher: createRestProxyDispatcher(restProxy) } : {}),
   });
 
   await step('синхронизация времени (/fapi/v1/time)', async () => {
@@ -112,6 +118,7 @@ async function main(): Promise<void> {
       allowHttp2: cfg.allowHttp2,
       bodyTimeoutMs: cfg.exchangeInfoTimeoutMs,
       headersTimeoutMs: Math.min(cfg.exchangeInfoTimeoutMs, 20_000),
+      ...(restProxy ? { dispatcher: createRestProxyDispatcher(restProxy) } : {}),
     });
     const res = await raw(`${endpoints.rest}/fapi/v1/exchangeInfo`, {
       method: 'GET',
@@ -154,19 +161,38 @@ async function main(): Promise<void> {
     return `${listenKey.slice(0, 6)}…`;
   });
 
-  // Публичный поток отвечает непрерывно. Если данные по нему идут, а по
-  // пользовательскому нет — дело в listenKey или аккаунте, а не в канале.
-  await step('данные по публичному WebSocket (btcusdt@aggTrade)', async () => {
-    const got = await waitForFrames(`${endpoints.ws}/ws/btcusdt@aggTrade`, 12_000, 1);
+  // Публичный поток отвечает непрерывно — это эталон живого WebSocket.
+  const wsProxy = parseProxy(proxyFor(cfg, 'ws'));
+  const wsAgent = createWsProxyAgent(wsProxy);
+  const publicUrl = `${endpoints.ws}/ws/btcusdt@aggTrade`;
+
+  const directOk = await step('данные по публичному WebSocket НАПРЯМУЮ', async () => {
+    const got = await waitForFrames(publicUrl, 12_000, 1);
+    if (!got.opened) throw new Error(`соединение не открылось за ${got.waitedMs} мс`);
     if (got.messages === 0) {
-      throw new Error(`соединение открылось, но за ${got.waitedMs} мс не пришло ни одного сообщения`);
+      throw new Error(
+        `сокет открылся, но за ${got.waitedMs} мс не пришло ни одного кадра — поток глушится`,
+      );
     }
     return `${got.messages} сообщ. за ${got.waitedMs} мс`;
   });
 
+  if (wsProxy) {
+    await step(`данные по публичному WebSocket ЧЕРЕЗ ПРОКСИ (${wsProxy.url})`, async () => {
+      const got = await waitForFrames(publicUrl, 15_000, 1, wsAgent);
+      if (!got.opened) throw new Error(`соединение через прокси не открылось за ${got.waitedMs} мс`);
+      if (got.messages === 0) throw new Error(`через прокси за ${got.waitedMs} мс кадров тоже нет`);
+      return `${got.messages} сообщ. за ${got.waitedMs} мс`;
+    });
+  } else if (!directOk) {
+    process.stdout.write(
+      '  · прокси не задан — укажите BINANCE_WS_PROXY, и doctor проверит его отдельным шагом\n',
+    );
+  }
+
   if (listenKey) {
     await step('подключение к user data stream', async () => {
-      const got = await waitForFrames(`${endpoints.ws}/ws/${listenKey}`, 8_000, 0);
+      const got = await waitForFrames(`${endpoints.ws}/ws/${listenKey}`, 8_000, 0, wsAgent);
       if (!got.opened) throw new Error('соединение не открылось');
       return 'соединение установлено';
     });
@@ -198,10 +224,18 @@ async function main(): Promise<void> {
           '    BINANCE_HTTP_TIMEOUT_MS и убедитесь, что BINANCE_ALLOW_HTTP2=false.\n',
       );
     }
-    if (f.name.startsWith('данные по публичному WebSocket')) {
+    if (f.name.startsWith('данные по публичному WebSocket НАПРЯМУЮ')) {
       process.stdout.write(
-        '  → WebSocket открывается, но данные не идут. Это канал: VPN или прокси\n' +
-          '    пропускает рукопожатие и глушит поток. Проверьте на прямом соединении.\n',
+        '  → Прямой WebSocket до Binance не работает: рукопожатие проходит, кадры не идут.\n' +
+          '    Так выглядит блокировка на стороне провайдера. Пустите поток через туннель:\n' +
+          '      BINANCE_WS_PROXY=http://127.0.0.1:1080     (или socks5://127.0.0.1:1080)\n' +
+          '    REST при этом можно оставить напрямую — он проходит.\n',
+      );
+    }
+    if (f.name.startsWith('данные по публичному WebSocket ЧЕРЕЗ ПРОКСИ')) {
+      process.stdout.write(
+        '  → Через прокси кадры тоже не идут. Проверьте схему адреса (http:// против\n' +
+          '    socks5://) и что сам прокси выпускает трафик на fstream.binance.com:443.\n',
       );
     }
     if (/-2015|-2014/.test(f.detail)) {

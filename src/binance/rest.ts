@@ -15,6 +15,8 @@ export interface RestClientOptions {
   /** Общий таймаут одного запроса, мс. */
   timeoutMs?: number;
   allowHttp2?: boolean;
+  /** Диспетчер undici (прокси). */
+  dispatcher?: import('undici').Dispatcher;
 }
 
 export interface RequestOptions {
@@ -63,6 +65,7 @@ export class BinanceRestClient {
         allowHttp2: opts.allowHttp2 ?? false,
         headersTimeoutMs: Math.min(this.defaultTimeoutMs, 20_000),
         bodyTimeoutMs: this.defaultTimeoutMs,
+        ...(opts.dispatcher ? { dispatcher: opts.dispatcher } : {}),
       });
   }
 

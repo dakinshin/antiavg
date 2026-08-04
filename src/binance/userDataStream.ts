@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import type { Agent as HttpAgent } from 'node:http';
 import type { BinanceRestClient } from './rest.js';
 import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
@@ -11,6 +12,8 @@ export interface UserDataStreamOptions {
   logger?: Logger;
   /** Пересоздание WebSocket — подменяется в тестах. */
   wsFactory?: (url: string) => WebSocket;
+  /** Прокси-агент для WebSocket (когда провайдер глушит прямой поток). */
+  wsAgent?: HttpAgent;
   /** Максимальная пауза между сообщениями до принудительного реконнекта. */
   stalenessTimeoutMs?: number;
   onEvent(evt: RawUserDataEvent): void;
@@ -77,7 +80,9 @@ export class UserDataStream {
     if (this.closed) return;
     this.listenKey = await this.opts.rest.createListenKey();
     const url = `${this.opts.wsBaseUrl}/ws/${this.listenKey}`;
-    const factory = this.opts.wsFactory ?? ((u: string) => new WebSocket(u));
+    const agent = this.opts.wsAgent;
+    const factory =
+      this.opts.wsFactory ?? ((u: string) => (agent ? new WebSocket(u, { agent }) : new WebSocket(u)));
     const ws = factory(url);
     this.ws = ws;
     this.lastMessageAtMs = Date.now();

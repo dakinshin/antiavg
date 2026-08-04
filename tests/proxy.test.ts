@@ -1,0 +1,118 @@
+/**
+ * Прокси проверяется по-настоящему: поднимается локальный HTTP CONNECT-прокси
+ * и локальный WebSocket-сервер, после чего проверяется, что кадры реально
+ * доходят через туннель.
+ */
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import http from 'node:http';
+import net from 'node:net';
+import type { AddressInfo } from 'node:net';
+import { WebSocketServer } from 'ws';
+import WebSocket from 'ws';
+import { createRestProxyDispatcher, createWsProxyAgent, parseProxy } from '../src/binance/proxy.js';
+import { proxyFor, testConfig } from '../src/config.js';
+
+describe('разбор адреса прокси', () => {
+  it('различает http и socks по схеме', () => {
+    expect(parseProxy('http://127.0.0.1:1080')).toMatchObject({ kind: 'http', host: '127.0.0.1', port: 1080 });
+    expect(parseProxy('socks5://127.0.0.1:1080')).toMatchObject({ kind: 'socks', port: 1080 });
+    expect(parseProxy('socks://10.0.0.1')).toMatchObject({ kind: 'socks', port: 1080 });
+  });
+
+  it('пустое значение — это отсутствие прокси', () => {
+    expect(parseProxy(undefined)).toBeUndefined();
+    expect(parseProxy('')).toBeUndefined();
+    expect(parseProxy('   ')).toBeUndefined();
+  });
+
+  it('адрес без схемы отвергается с понятным сообщением', () => {
+    expect(() => parseProxy('127.0.0.1:1080')).toThrow(/схема/i);
+  });
+
+  it('неподдерживаемая схема отвергается', () => {
+    expect(() => parseProxy('ftp://127.0.0.1:21')).toThrow(/схема/i);
+  });
+
+  it('REST через SOCKS сообщает об ограничении, а не молчит', () => {
+    expect(() => createRestProxyDispatcher(parseProxy('socks5://127.0.0.1:1080'))).toThrow(/SOCKS/);
+  });
+
+  it('точечная настройка перекрывает общую', () => {
+    const cfg = testConfig({ proxyUrl: 'http://common:1', wsProxyUrl: 'http://ws:2' });
+    expect(proxyFor(cfg, 'ws')).toBe('http://ws:2');
+    expect(proxyFor(cfg, 'rest')).toBe('http://common:1');
+  });
+
+  it('без настроек прокси нет', () => {
+    const cfg = testConfig();
+    expect(proxyFor(cfg, 'ws')).toBeUndefined();
+    expect(createWsProxyAgent(parseProxy(proxyFor(cfg, 'ws')))).toBeUndefined();
+  });
+});
+
+describe('WebSocket через HTTP CONNECT-прокси', () => {
+  let wss: WebSocketServer;
+  let proxy: http.Server;
+  let wsPort: number;
+  let proxyPort: number;
+  const connectTargets: string[] = [];
+
+  beforeAll(async () => {
+    wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    await new Promise<void>((r) => wss.once('listening', r));
+    wss.on('connection', (socket) => {
+      socket.send(JSON.stringify({ e: 'hello' }));
+    });
+    wsPort = (wss.address() as AddressInfo).port;
+
+    // Минимальный CONNECT-прокси: туннелирует TCP как настоящий HTTP-прокси.
+    proxy = http.createServer((_req, res) => {
+      res.writeHead(405);
+      res.end();
+    });
+    proxy.on('connect', (req, clientSocket, head) => {
+      connectTargets.push(req.url ?? '');
+      const [host, port] = (req.url ?? '').split(':');
+      const upstream = net.connect(Number(port), host, () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (head?.length) upstream.write(head);
+        upstream.pipe(clientSocket);
+        clientSocket.pipe(upstream);
+      });
+      upstream.on('error', () => clientSocket.destroy());
+      clientSocket.on('error', () => upstream.destroy());
+    });
+    await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r));
+    proxyPort = (proxy.address() as AddressInfo).port;
+  });
+
+  afterAll(() => {
+    wss?.close();
+    proxy?.close();
+  });
+
+  it('кадры доходят через туннель, и прокси действительно задействован', async () => {
+    const agent = createWsProxyAgent(parseProxy(`http://127.0.0.1:${proxyPort}`));
+    expect(agent).toBeDefined();
+
+    const message = await new Promise<string>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${wsPort}/ws/test`, { agent });
+      const timer = setTimeout(() => {
+        ws.terminate();
+        reject(new Error('через прокси не пришло ни одного кадра'));
+      }, 8_000);
+      ws.once('message', (data) => {
+        clearTimeout(timer);
+        ws.close();
+        resolve(data.toString());
+      });
+      ws.once('error', (e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+    });
+
+    expect(JSON.parse(message)).toEqual({ e: 'hello' });
+    expect(connectTargets.some((t) => t.endsWith(`:${wsPort}`))).toBe(true);
+  }, 15_000);
+});

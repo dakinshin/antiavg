@@ -50,6 +50,15 @@ export const ConfigSchema = z.object({
   preloadExchangeInfo: boolFromEnv.default(true),
   /** Пауза перед повторной попыткой запуска при сетевой ошибке, мс. 0 — не повторять. */
   startupRetryMs: numFromEnv(15_000),
+  /**
+   * Прокси для обоих транспортов. Схема обязательна:
+   * http://127.0.0.1:1080 или socks5://127.0.0.1:1080.
+   */
+  proxyUrl: z.string().optional(),
+  /** Прокси только для WebSocket (перекрывает proxyUrl). */
+  wsProxyUrl: z.string().optional(),
+  /** Прокси только для REST (перекрывает proxyUrl). Поддерживается только http/https. */
+  restProxyUrl: z.string().optional(),
 
   /** --- Что охраняем --- */
   /** Пустой список = все символы. */
@@ -166,6 +175,9 @@ export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config 
     allowHttp2: env.BINANCE_ALLOW_HTTP2 ?? 'false',
     preloadExchangeInfo: env.ANTIAVG_PRELOAD_EXCHANGE_INFO ?? 'true',
     startupRetryMs: env.ANTIAVG_STARTUP_RETRY_MS,
+    proxyUrl: env.BINANCE_PROXY || undefined,
+    wsProxyUrl: env.BINANCE_WS_PROXY || undefined,
+    restProxyUrl: env.BINANCE_REST_PROXY || undefined,
 
     symbols: env.ANTIAVG_SYMBOLS,
     excludeSymbols: env.ANTIAVG_EXCLUDE_SYMBOLS,
@@ -209,6 +221,11 @@ export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config 
 export function testConfig(overrides: Partial<Config> = {}): Config {
   const base = ConfigSchema.parse({ apiKey: 'test', apiSecret: 'test' });
   return { ...base, ...overrides };
+}
+
+/** Адрес прокси для конкретного транспорта с учётом общего значения. */
+export function proxyFor(cfg: Config, kind: 'ws' | 'rest'): string | undefined {
+  return (kind === 'ws' ? cfg.wsProxyUrl : cfg.restProxyUrl) ?? cfg.proxyUrl;
 }
 
 export function isSymbolWatched(cfg: Config, symbol: string): boolean {

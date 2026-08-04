@@ -9,7 +9,7 @@
  *  - у глобального fetch нет управляемых таймаутов на заголовки и тело, из-за чего
  *    запрос может висеть десятками секунд без единого байта.
  */
-import { Agent, fetch as undiciFetch } from 'undici';
+import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
 
 export interface HttpResponse {
   ok: boolean;
@@ -34,10 +34,12 @@ export interface HttpFetchOptions {
   bodyTimeoutMs?: number;
   /** false (по умолчанию) — принудительный HTTP/1.1. */
   allowHttp2?: boolean;
+  /** Готовый диспетчер (например, прокси). Если задан, используется вместо своего Agent. */
+  dispatcher?: Dispatcher;
 }
 
 export function createHttpFetch(opts: HttpFetchOptions = {}): HttpFetch {
-  const agent = new Agent({
+  const agent = opts.dispatcher ?? new Agent({
     allowH2: opts.allowHttp2 ?? false,
     connect: { timeout: opts.connectTimeoutMs ?? 10_000 },
     headersTimeout: opts.headersTimeoutMs ?? 20_000,
