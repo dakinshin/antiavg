@@ -110,6 +110,10 @@ export const ConfigSchema = z.object({
   /** --- Служебное --- */
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   logJson: boolFromEnv.default(false),
+  /** Печатать каждое сырое событие WebSocket — для диагностики «сервис молчит». */
+  logRawEvents: boolFromEnv.default(false),
+  /** Периодический отчёт о счётчиках событий и позиций, мс. 0 — выключено. */
+  statsIntervalMs: numFromEnv(300_000),
   /** Периодическая сверка состояния с REST, мс (0 — выключено). */
   reconcileIntervalMs: numFromEnv(60_000),
   /** Задержка применения снимка из ACCOUNT_UPDATE, мс. */
@@ -171,6 +175,8 @@ export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config 
 
     logLevel: env.LOG_LEVEL ?? 'info',
     logJson: env.LOG_JSON ?? 'false',
+    logRawEvents: env.ANTIAVG_LOG_RAW_EVENTS ?? 'false',
+    statsIntervalMs: env.ANTIAVG_STATS_INTERVAL_MS,
     reconcileIntervalMs: env.ANTIAVG_RECONCILE_INTERVAL_MS,
     snapshotApplyDelayMs: env.ANTIAVG_SNAPSHOT_APPLY_DELAY_MS,
     listenKeyKeepAliveMs: env.ANTIAVG_LISTEN_KEY_KEEPALIVE_MS,

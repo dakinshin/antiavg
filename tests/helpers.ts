@@ -9,6 +9,7 @@ import {
   type RawOrderTradeUpdate,
 } from '../src/binance/mappers.js';
 import type { OrderSide, OrderType, PositionSide, ProtectiveAction } from '../src/types.js';
+import type { Logger } from '../src/util/logger.js';
 
 export class FakeClock {
   constructor(private t = 1_700_000_000_000) {}
@@ -48,9 +49,23 @@ export class RecordingExecutor implements ProtectiveExecutor {
 
 export interface HarnessOptions extends Partial<Config> {}
 
+/** Логгер, складывающий записи в массив — для проверки наблюдаемости. */
+export function recordingLogger() {
+  const lines: Array<{ level: string; msg: string; meta: Record<string, unknown> }> = [];
+  const make = (bindings: Record<string, unknown>): Logger => ({
+    debug: (m, meta) => lines.push({ level: 'debug', msg: m, meta: { ...bindings, ...meta } }),
+    info: (m, meta) => lines.push({ level: 'info', msg: m, meta: { ...bindings, ...meta } }),
+    warn: (m, meta) => lines.push({ level: 'warn', msg: m, meta: { ...bindings, ...meta } }),
+    error: (m, meta) => lines.push({ level: 'error', msg: m, meta: { ...bindings, ...meta } }),
+    child: (extra) => make({ ...bindings, ...extra }),
+  });
+  return { logger: make({}), lines };
+}
+
 export function makeHarness(overrides: HarnessOptions = {}) {
   const clock = new FakeClock();
   const executor = new RecordingExecutor();
+  const { logger, lines } = recordingLogger();
   const cfg = testConfig({
     // Таймер агрегации намеренно большой: в тестах вызываем flushAll() вручную.
     aggregationWindowMs: 60_000,
@@ -58,8 +73,8 @@ export function makeHarness(overrides: HarnessOptions = {}) {
     dryRun: false,
     ...overrides,
   });
-  const engine = new Engine({ cfg, executor, now: clock.now });
-  return { cfg, clock, executor, engine };
+  const engine = new Engine({ cfg, executor, now: clock.now, logger });
+  return { cfg, clock, executor, engine, logs: lines };
 }
 
 let orderIdSeq = 1000;

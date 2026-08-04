@@ -62,3 +62,9 @@ export function toNum(value: string | number | undefined | null, fallback = 0): 
   const n = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(n) ? n : fallback;
 }
+
+/** Короткое представление для логов: убирает хвосты плавающей точки. */
+export function round8(value: number): number {
+  if (!Number.isFinite(value)) return value;
+  return Number(value.toFixed(8));
+}

@@ -5,6 +5,21 @@ import type { AveragingSkipReason, DetectionResult, FillEvent, OrderRecord } fro
 
 export const LIQUIDATION_CLIENT_ID_PREFIXES = ['autoclose-', 'adl_autoclose'];
 
+/** Человекочитаемые причины, почему исполнение не признано усреднением. */
+export const SKIP_REASON_TEXT: Record<AveragingSkipReason, string> = {
+  'not-an-increase': 'позиция не увеличилась (закрытие или уменьшение)',
+  'position-was-flat': 'это открытие новой позиции, а не долив',
+  'not-in-loss': 'цена долива не хуже средней входа',
+  'below-loss-threshold': 'убыток меньше порога ANTIAVG_LOSS_THRESHOLD_PCT',
+  'pre-existing-order': 'ордер размещён ДО открытия позиции (вход сеткой)',
+  'unknown-open-time': 'время открытия позиции неизвестно, политика = skip',
+  'liquidation-or-adl': 'ликвидация или ADL',
+  'own-order': 'собственный защитный ордер сервиса',
+  'reduce-only': 'ордер reduceOnly, позицию увеличить не может',
+  'symbol-not-watched': 'символ вне списка наблюдения',
+  cooldown: 'действие подавлено паузой между реакциями',
+};
+
 export interface PositionBefore {
   qty: number;
   entryPrice: number;

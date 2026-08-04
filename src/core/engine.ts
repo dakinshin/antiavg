@@ -1,9 +1,9 @@
 import type { Config } from '../config.js';
 import { isSymbolWatched } from '../config.js';
-import { analyzeFill } from './detector.js';
+import { analyzeFill, SKIP_REASON_TEXT } from './detector.js';
 import { OrderRegistry } from './orderRegistry.js';
 import { PositionStore } from './positionStore.js';
-import { isZero } from '../util/num.js';
+import { isZero, round8 } from '../util/num.js';
 import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
 import {
@@ -73,10 +73,17 @@ export class Engine {
   private readonly pendingSnapshots = new Map<PositionKey, PendingSnapshot>();
   private readonly lastActionAtMs = new Map<PositionKey, number>();
   private readonly inFlight = new Set<PositionKey>();
-  /** Время последнего обработанного исполнения по позиции — чтобы не применять устаревший снимок. */
+  /**
+   * Время последнего обработанного исполнения по позиции ПО ЧАСАМ БИРЖИ.
+   * Снимок, снятый раньше этого момента, устарел и применяться не должен.
+   */
   private readonly lastFillAtMs = new Map<PositionKey, number>();
 
   private stopped = false;
+  private fills = 0;
+  private detections = 0;
+  private staleSnapshots = 0;
+  private desyncs = 0;
 
   constructor(opts: EngineOptions) {
     this.cfg = opts.cfg;
@@ -119,11 +126,49 @@ export class Engine {
         continue;
       }
       const existing = this.positions.peek(s.symbol, s.positionSide);
+
+      // Биржа знает о позиции, а мы считаем её пустой — значит, мы пропустили
+      // исполнения по WebSocket. Это ровно та поломка, при которой сервис молчит,
+      // поэтому она должна быть громкой.
+      if (!existing || isZero(existing.qty)) {
+        this.desyncs++;
+        this.log.warn('расхождение: биржа показывает позицию, которой мы не видели', {
+          symbol: s.symbol,
+          positionSide: s.positionSide,
+          qty: s.qty,
+          entryPrice: s.entryPrice,
+          подсказка: 'исполнения не доходят по WebSocket — проверьте ANTIAVG_LOG_RAW_EVENTS=true',
+        });
+      } else if (Math.abs(existing.qty - s.qty) > Math.abs(s.qty) * 1e-6 + 1e-9) {
+        this.desyncs++;
+        this.log.warn('расхождение объёма позиции с биржей', {
+          symbol: s.symbol,
+          positionSide: s.positionSide,
+          нашОбъём: round8(existing.qty),
+          объёмБиржи: round8(s.qty),
+        });
+      }
+
       // Если позицию мы уже ведём сами и время открытия известно — не теряем его.
       const keepKnown =
         existing && !isZero(existing.qty) && existing.openTimeKnown && existing.openedAtMs !== null;
       const resolved = openTimes?.get(key) ?? null;
       const openedAtMs = keepKnown ? existing.openedAtMs : resolved;
+
+      // Снимок мог быть снят до последнего исполнения — тогда объём и среднюю не трогаем,
+      // иначе сверка откатит состояние назад и следующий долив будет разобран неверно.
+      const lastFill = this.lastFillAtMs.get(key);
+      if (lastFill !== undefined && s.atMs > 0 && s.atMs < lastFill) {
+        this.staleSnapshots++;
+        this.log.debug('снимок устарел, применяю только время открытия', {
+          symbol: s.symbol,
+          snapshotAtMs: s.atMs,
+          lastFillAtMs: lastFill,
+        });
+        this.positions.setOpenTime(s.symbol, s.positionSide, openedAtMs, openedAtMs !== null);
+        continue;
+      }
+
       this.positions.applySnapshot(s.symbol, s.positionSide, s.qty, s.entryPrice, s.atMs, {
         openedAtMs,
         openTimeKnown: openedAtMs !== null,
@@ -143,7 +188,9 @@ export class Engine {
   /** Обработка исполнения — основная точка входа детекции. */
   onFill(fill: FillEvent): DetectionResult {
     const key = positionKey(fill.symbol, fill.positionSide);
-    this.lastFillAtMs.set(key, this.now());
+    this.fills++;
+    // Время по часам БИРЖИ: с ним сравниваются снимки, чтобы не применить устаревший.
+    this.lastFillAtMs.set(key, fill.tradeTimeMs || fill.eventTimeMs || this.now());
     this.cancelPendingSnapshot(key);
 
     const order = this.orders.get(fill.orderId);
@@ -166,27 +213,44 @@ export class Engine {
 
     const result = analyzeFill({ cfg: this.cfg, fill, order, before, applied });
 
+    // Каждое исполнение видно на уровне info: без этого невозможно понять,
+    // почему сервис молчит.
+    const common = {
+      symbol: fill.symbol,
+      positionSide: fill.positionSide,
+      side: fill.side,
+      qty: fill.lastFilledQty,
+      price: fill.lastFilledPrice,
+      orderType: fill.origType,
+      orderId: fill.orderId,
+      позицияДо: round8(result.before.qty),
+      средняяДо: round8(result.before.entryPrice),
+      позицияПосле: round8(applied.after.qty),
+      средняяПосле: round8(applied.after.entryPrice),
+      отклонениеОтВходаПроц: round8(result.adverseDeviationPct),
+    };
+
     if (!result.detected) {
-      this.log.debug('fill обработан, усреднения нет', {
-        symbol: fill.symbol,
-        positionSide: fill.positionSide,
-        reason: result.reason,
-        qty: applied.after.qty,
-        entry: Number(applied.after.entryPrice.toFixed(8)),
+      const reason = result.reason ?? 'not-an-increase';
+      this.log.info('исполнение: не усреднение', {
+        ...common,
+        причина: SKIP_REASON_TEXT[reason],
+        reason,
+        ...(reason === 'pre-existing-order' && order
+          ? {
+              ордерРазмещён: new Date(order.placedAtMs).toISOString(),
+              позицияОткрыта: before.openedAtMs ? new Date(before.openedAtMs).toISOString() : null,
+            }
+          : {}),
       });
       this.hooks.onSkip?.(result);
       return result;
     }
 
-    this.log.warn('обнаружено усреднение в убытке', {
-      symbol: fill.symbol,
-      positionSide: fill.positionSide,
-      addedQty: result.addedQty,
-      fillPrice: result.fillPrice,
-      entryBefore: Number(result.before.entryPrice.toFixed(8)),
-      adversePct: Number(result.adverseDeviationPct.toFixed(4)),
-      orderId: fill.orderId,
-      orderType: fill.origType,
+    this.detections++;
+    this.log.warn('ОБНАРУЖЕНО УСРЕДНЕНИЕ В УБЫТКЕ', {
+      ...common,
+      добавленоОбъёма: result.addedQty,
     });
     this.hooks.onDetection?.(result);
     this.enqueue(key, result);
@@ -214,6 +278,13 @@ export class Engine {
 
   /** Немедленная сверка (REST reconcile). */
   applySnapshotNow(snapshot: PositionSnapshot): void {
+    const key = positionKey(snapshot.symbol, snapshot.positionSide);
+    const lastFill = this.lastFillAtMs.get(key);
+    if (lastFill !== undefined && snapshot.atMs > 0 && snapshot.atMs < lastFill) {
+      this.staleSnapshots++;
+      this.log.debug('снимок устарел, пропущен', { key, snapshotAtMs: snapshot.atMs, lastFillAtMs: lastFill });
+      return;
+    }
     const p = this.positions.get(snapshot.symbol, snapshot.positionSide);
     const drift = Math.abs(p.qty - snapshot.qty);
     if (drift > 1e-9 || Math.abs(p.entryPrice - snapshot.entryPrice) > 1e-6) {
@@ -363,6 +434,17 @@ export class Engine {
     for (const key of [...this.pending.keys()]) {
       await this.flush(key);
     }
+  }
+
+  /** Счётчики для периодического отчёта о жизни сервиса. */
+  stats(): { fills: number; detections: number; staleSnapshots: number; desyncs: number; openPositions: number } {
+    return {
+      fills: this.fills,
+      detections: this.detections,
+      staleSnapshots: this.staleSnapshots,
+      desyncs: this.desyncs,
+      openPositions: this.positions.open().length,
+    };
   }
 
   stop(): void {

@@ -17,6 +17,7 @@ import {
 import { Engine } from './core/engine.js';
 import type { Logger } from './util/logger.js';
 import { positionKey } from './types.js';
+import { isZero } from './util/num.js';
 
 export interface AppDeps {
   cfg: Config;
@@ -30,7 +31,10 @@ export class App {
   private stream: UserDataStream | null = null;
   private engine: Engine | null = null;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
+  private statsTimer: ReturnType<typeof setInterval> | null = null;
   private hedgeMode = false;
+  /** Счётчики событий по типам — чтобы было видно, что поток вообще живой. */
+  private readonly eventCounts = new Map<string, number>();
 
   constructor(private readonly deps: AppDeps) {
     const endpoints = resolveEndpoints(deps.cfg);
@@ -122,6 +126,18 @@ export class App {
       if (typeof this.reconcileTimer.unref === 'function') this.reconcileTimer.unref();
     }
 
+    if (cfg.statsIntervalMs > 0) {
+      this.statsTimer = setInterval(() => {
+        const engine = this.engine;
+        if (!engine) return;
+        logger.info('состояние сервиса', {
+          ...engine.stats(),
+          события: Object.fromEntries(this.eventCounts),
+        });
+      }, cfg.statsIntervalMs);
+      if (typeof this.statsTimer.unref === 'function') this.statsTimer.unref();
+    }
+
     logger.info('сервис готов, слежу за усреднением в убытке');
   }
 
@@ -136,10 +152,17 @@ export class App {
 
     const watched = positions.filter((p) => isSymbolWatched(cfg, p.symbol));
 
+    // Время открытия восстанавливаем только для позиций, по которым мы его ещё не знаем:
+    // это запрос истории сделок на каждый символ, гонять его каждую минуту незачем.
+    const needOpenTime = watched.filter((p) => {
+      const known = engine.positions.peek(p.symbol, p.positionSide);
+      return !(known && !isZero(known.qty) && known.openTimeKnown && known.openedAtMs !== null);
+    });
+
     let openTimes = new Map<string, number | null>();
-    if (cfg.reconstructOpenTimeOnBoot && watched.length > 0) {
+    if (cfg.reconstructOpenTimeOnBoot && needOpenTime.length > 0) {
       openTimes = await this.account
-        .resolveOpenTimes(watched, cfg.reconstructLookbackHours)
+        .resolveOpenTimes(needOpenTime, cfg.reconstructLookbackHours)
         .catch((e: unknown) => {
           logger.warn('восстановление времён открытия не удалось', { error: String(e) });
           return new Map<string, number | null>();
@@ -195,6 +218,13 @@ export class App {
     if (!engine) return;
     const { cfg, logger } = this.deps;
 
+    const type = String(evt.e ?? 'unknown');
+    const seen = this.eventCounts.get(type) ?? 0;
+    this.eventCounts.set(type, seen + 1);
+    // Первое событие каждого типа — на уровне info: сразу видно, что поток работает.
+    if (seen === 0) logger.info('получено первое событие типа', { type });
+    if (cfg.logRawEvents) logger.info('RAW событие', { payload: JSON.stringify(evt) });
+
     switch (evt.e) {
       case 'ORDER_TRADE_UPDATE': {
         const raw = evt as RawOrderTradeUpdate;
@@ -230,7 +260,9 @@ export class App {
 
   async stop(): Promise<void> {
     if (this.reconcileTimer) clearInterval(this.reconcileTimer);
+    if (this.statsTimer) clearInterval(this.statsTimer);
     this.reconcileTimer = null;
+    this.statsTimer = null;
     this.engine?.stop();
     await this.stream?.stop();
     this.deps.logger.info('сервис остановлен');
