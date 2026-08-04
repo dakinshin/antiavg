@@ -51,6 +51,8 @@ export interface OrderRecord {
   /** Время размещения ордера (мс). Именно оно сравнивается с временем открытия позиции. */
   placedAtMs: number;
   origQty: number;
+  /** Исполненное количество на момент последнего известия об ордере. */
+  executedQty: number;
   price: number;
   stopPrice: number;
   reduceOnly: boolean;

@@ -3,7 +3,7 @@ import { isSymbolWatched } from '../config.js';
 import { analyzeFill, SKIP_REASON_TEXT } from './detector.js';
 import { OrderRegistry } from './orderRegistry.js';
 import { PositionStore } from './positionStore.js';
-import { isZero, round8 } from '../util/num.js';
+import { isZero, round8, sameSign } from '../util/num.js';
 import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
 import {
@@ -13,6 +13,8 @@ import {
   type OrderLifecycleEvent,
   type PositionKey,
   type PositionSnapshot,
+  type PositionState,
+  type OrderRecord,
   type ProtectiveAction,
 } from '../types.js';
 
@@ -79,8 +81,13 @@ export class Engine {
    */
   private readonly lastFillAtMs = new Map<PositionKey, number>();
 
+  /** Открытые ордера на момент предыдущей сверки — для вычисления кандидатов. */
+  private prevOpenOrders = new Map<number, OrderRecord>();
+  private filledCandidates: OrderRecord[] = [];
+
   private stopped = false;
   private fills = 0;
+  private restDetections = 0;
   private detections = 0;
   private staleSnapshots = 0;
   private desyncs = 0;
@@ -105,7 +112,27 @@ export class Engine {
 
   /** Загрузка снимка открытых ордеров при старте / сверке. */
   seedOrders(records: OrderLifecycleEvent['order'][]): void {
-    for (const r of records) this.orders.upsert(r);
+    // Ордера, которые между сверками исчезли из списка открытых или у которых
+    // выросло исполненное количество, — кандидаты на роль «того самого» ордера,
+    // породившего изменение позиции. Нужны, когда исполнения не приходят по WS.
+    const nowIds = new Map<number, OrderRecord>();
+    for (const r of records) {
+      this.orders.upsert(r);
+      nowIds.set(r.orderId, r);
+    }
+
+    const candidates: OrderRecord[] = [];
+    for (const [orderId, prev] of this.prevOpenOrders) {
+      const current = nowIds.get(orderId);
+      if (!current) {
+        candidates.push(prev);
+      } else if (current.executedQty > prev.executedQty + 1e-12) {
+        candidates.push(current);
+      }
+    }
+    this.filledCandidates = candidates;
+
+    this.prevOpenOrders = nowIds;
   }
 
   /**
@@ -137,7 +164,7 @@ export class Engine {
           positionSide: s.positionSide,
           qty: s.qty,
           entryPrice: s.entryPrice,
-          подсказка: 'исполнения не доходят по WebSocket — проверьте ANTIAVG_LOG_RAW_EVENTS=true',
+          подсказка: 'исполнения не доходят по WebSocket — работает резервный путь через REST',
         });
       } else if (Math.abs(existing.qty - s.qty) > Math.abs(s.qty) * 1e-6 + 1e-9) {
         this.desyncs++;
@@ -147,6 +174,9 @@ export class Engine {
           нашОбъём: round8(existing.qty),
           объёмБиржи: round8(s.qty),
         });
+        // Позиция выросла в ту же сторону, а исполнения мы не видели — разбираем
+        // прирост как усреднение прямо здесь, по данным REST.
+        this.detectIncreaseFromSnapshot(existing, s);
       }
 
       // Если позицию мы уже ведём сами и время открытия известно — не теряем его.
@@ -183,6 +213,99 @@ export class Engine {
         openTimeKnown: true,
       });
     }
+  }
+
+  /**
+   * Резервный путь: усреднение, вычисленное из разницы двух снимков позиции.
+   *
+   * Работает, когда исполнения не приходят по WebSocket. Средняя цена входа —
+   * величина, по которой прирост восстанавливается точно:
+   *   entry₁·|qty₁| = entry₀·|qty₀| + price·added   =>   price = (entry₁·|qty₁| − entry₀·|qty₀|) / added
+   * То есть цену долива не нужно знать из сделки — она следует из движения средней.
+   */
+  private detectIncreaseFromSnapshot(prev: PositionState, next: PositionSnapshot): void {
+    if (!this.cfg.restFallbackDetection) return;
+    if (isZero(prev.qty) || isZero(next.qty)) return;
+    if (!sameSign(prev.qty, next.qty)) return;
+
+    const prevAbs = Math.abs(prev.qty);
+    const nextAbs = Math.abs(next.qty);
+    const added = nextAbs - prevAbs;
+    if (added <= 0) return;
+    if (prev.entryPrice <= 0 || next.entryPrice <= 0) return;
+
+    const price = (next.entryPrice * nextAbs - prev.entryPrice * prevAbs) / added;
+    if (!Number.isFinite(price) || price <= 0) return;
+
+    const before = {
+      qty: prev.qty,
+      entryPrice: prev.entryPrice,
+      openedAtMs: prev.openedAtMs,
+      openTimeKnown: prev.openTimeKnown,
+    };
+
+    // Кандидат-ордер: из тех, что исчезли или доисполнились между сверками,
+    // берём самый ранний по времени размещения — он даёт правилу «сетка выставлена
+    // до открытия позиции» самый мягкий (то есть безопасный) ответ.
+    const candidates = this.filledCandidates.filter(
+      (o) => o.symbol === next.symbol && o.positionSide === next.positionSide && !o.reduceOnly,
+    );
+    const order = candidates.sort((a, b) => a.placedAtMs - b.placedAtMs)[0];
+
+    const signedDelta = next.qty > 0 ? added : -added;
+    const fill: FillEvent = {
+      eventTimeMs: next.atMs,
+      tradeTimeMs: next.atMs,
+      symbol: next.symbol,
+      positionSide: next.positionSide,
+      side: next.qty > 0 ? 'BUY' : 'SELL',
+      orderId: order?.orderId ?? -1,
+      clientOrderId: order?.clientOrderId ?? '',
+      tradeId: 0,
+      lastFilledQty: added,
+      lastFilledPrice: price,
+      cumFilledQty: added,
+      type: order?.type ?? 'MARKET',
+      origType: order?.origType ?? 'MARKET',
+      reduceOnly: false,
+      closePosition: false,
+      origQty: added,
+      price,
+      stopPrice: 0,
+      orderStatus: 'FILLED',
+    };
+
+    const applied = this.positions.applyFill(next.symbol, next.positionSide, signedDelta, price, next.atMs);
+    const result = analyzeFill({ cfg: this.cfg, fill, order, before, applied });
+
+    const common = {
+      symbol: next.symbol,
+      positionSide: next.positionSide,
+      источник: 'REST-сверка',
+      добавленоОбъёма: round8(added),
+      ценаДолива: round8(price),
+      средняяДо: round8(prev.entryPrice),
+      средняяПосле: round8(next.entryPrice),
+      отклонениеОтВходаПроц: round8(result.adverseDeviationPct),
+      ордерКандидат: order ? order.orderId : 'не найден (похоже на рыночный ордер)',
+    };
+
+    if (!result.detected) {
+      const reason = result.reason ?? 'not-an-increase';
+      this.log.info('прирост позиции по сверке: не усреднение', {
+        ...common,
+        причина: SKIP_REASON_TEXT[reason],
+        reason,
+      });
+      this.hooks.onSkip?.(result);
+      return;
+    }
+
+    this.detections++;
+    this.restDetections++;
+    this.log.warn('ОБНАРУЖЕНО УСРЕДНЕНИЕ В УБЫТКЕ (по сверке, WebSocket молчит)', common);
+    this.hooks.onDetection?.(result);
+    this.enqueue(positionKey(next.symbol, next.positionSide), result);
   }
 
   /** Обработка исполнения — основная точка входа детекции. */
@@ -437,11 +560,19 @@ export class Engine {
   }
 
   /** Счётчики для периодического отчёта о жизни сервиса. */
-  stats(): { fills: number; detections: number; staleSnapshots: number; desyncs: number; openPositions: number } {
+  stats(): {
+    fills: number;
+    detections: number;
+    restDetections: number;
+    staleSnapshots: number;
+    desyncs: number;
+    openPositions: number;
+  } {
     return {
       fills: this.fills,
       detections: this.detections,
       staleSnapshots: this.staleSnapshots,
+      restDetections: this.restDetections,
       desyncs: this.desyncs,
       openPositions: this.positions.open().length,
     };

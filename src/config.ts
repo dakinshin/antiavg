@@ -83,6 +83,18 @@ export const ConfigSchema = z.object({
   reconstructLookbackHours: numFromEnv(24 * 7),
   /** Минимальный объём долива (в базовой валюте), ниже которого игнорируем. */
   minAveragingQty: numFromEnv(0),
+  /**
+   * Резервная детекция по REST-сверке: если исполнения не приходят по WebSocket,
+   * усреднение вычисляется из движения объёма и средней цены входа между снимками.
+   */
+  restFallbackDetection: boolFromEnv.default(false),
+  /**
+   * Через сколько миллисекунд молчания WebSocket считать поток мёртвым и
+   * переключить сверку на частый опрос. 0 — не переключать.
+   */
+  wsSilenceTimeoutMs: numFromEnv(45_000),
+  /** Интервал частой сверки, когда WebSocket молчит, мс. */
+  fallbackPollIntervalMs: numFromEnv(3000),
 
   /** --- Реакция --- */
   /** 'reduce' — срезать ровно добавленный объём; 'close' — закрыть позицию целиком. */
@@ -164,6 +176,9 @@ export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config 
     reconstructOpenTimeOnBoot: env.ANTIAVG_RECONSTRUCT_OPEN_TIME ?? 'true',
     reconstructLookbackHours: env.ANTIAVG_RECONSTRUCT_LOOKBACK_HOURS,
     minAveragingQty: env.ANTIAVG_MIN_AVERAGING_QTY,
+    restFallbackDetection: env.ANTIAVG_REST_FALLBACK ?? 'false',
+    wsSilenceTimeoutMs: env.ANTIAVG_WS_SILENCE_TIMEOUT_MS,
+    fallbackPollIntervalMs: env.ANTIAVG_FALLBACK_POLL_INTERVAL_MS,
 
     reactionMode: env.ANTIAVG_REACTION_MODE ?? 'reduce',
     dryRun: env.ANTIAVG_DRY_RUN ?? 'true',

@@ -82,6 +82,7 @@ export function toOrderRecord(raw: RawOrderTradeUpdate, ownPrefix: string): Orde
     // событий OrderRegistry сохранит минимальное (то есть исходное) значение.
     placedAtMs: raw.T ?? raw.E,
     origQty: toNum(o.q),
+    executedQty: toNum(o.z),
     price: toNum(o.p),
     stopPrice: toNum(o.sp),
     reduceOnly: Boolean(o.R),
@@ -152,6 +153,7 @@ export interface RawOpenOrder {
   type: OrderType;
   origType?: OrderType;
   origQty: string;
+  executedQty?: string;
   price: string;
   stopPrice?: string;
   reduceOnly?: boolean;
@@ -171,6 +173,7 @@ export function openOrderToRecord(raw: RawOpenOrder, ownPrefix: string): OrderRe
     origType: (raw.origType ?? raw.type) as OrderType,
     placedAtMs: raw.time,
     origQty: toNum(raw.origQty),
+    executedQty: toNum(raw.executedQty),
     price: toNum(raw.price),
     stopPrice: toNum(raw.stopPrice),
     reduceOnly: Boolean(raw.reduceOnly),

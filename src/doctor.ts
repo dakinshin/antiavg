@@ -22,6 +22,47 @@ interface StepResult {
 
 const results: StepResult[] = [];
 
+/** Открывает WebSocket и ждёт заданное число кадров (или истечения таймаута). */
+function waitForFrames(
+  url: string,
+  timeoutMs: number,
+  needMessages: number,
+): Promise<{ opened: boolean; messages: number; waitedMs: number }> {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    let opened = false;
+    let messages = 0;
+    const ws = new WebSocket(url);
+
+    const finish = (err?: Error) => {
+      clearTimeout(timer);
+      try {
+        ws.removeAllListeners();
+        ws.terminate();
+      } catch {
+        /* ignore */
+      }
+      if (err) reject(err);
+      else resolve({ opened, messages, waitedMs: Date.now() - started });
+    };
+
+    const timer = setTimeout(() => {
+      if (!opened) finish(new Error(`таймаут подключения ${timeoutMs} мс`));
+      else finish();
+    }, timeoutMs);
+
+    ws.once('open', () => {
+      opened = true;
+      if (needMessages === 0) finish();
+    });
+    ws.on('message', () => {
+      messages++;
+      if (messages >= needMessages && needMessages > 0) finish();
+    });
+    ws.once('error', (err: Error) => finish(err));
+  });
+}
+
 async function step(name: string, fn: () => Promise<string>): Promise<boolean> {
   const t = Date.now();
   try {
@@ -113,28 +154,24 @@ async function main(): Promise<void> {
     return `${listenKey.slice(0, 6)}…`;
   });
 
+  // Публичный поток отвечает непрерывно. Если данные по нему идут, а по
+  // пользовательскому нет — дело в listenKey или аккаунте, а не в канале.
+  await step('данные по публичному WebSocket (btcusdt@aggTrade)', async () => {
+    const got = await waitForFrames(`${endpoints.ws}/ws/btcusdt@aggTrade`, 12_000, 1);
+    if (got.messages === 0) {
+      throw new Error(`соединение открылось, но за ${got.waitedMs} мс не пришло ни одного сообщения`);
+    }
+    return `${got.messages} сообщ. за ${got.waitedMs} мс`;
+  });
+
   if (listenKey) {
     await step('подключение к user data stream', async () => {
-      const url = `${endpoints.ws}/ws/${listenKey}`;
-      await new Promise<void>((resolve, reject) => {
-        const ws = new WebSocket(url);
-        const timer = setTimeout(() => {
-          ws.terminate();
-          reject(new Error('таймаут подключения 15 с'));
-        }, 15_000);
-        ws.once('open', () => {
-          clearTimeout(timer);
-          ws.close();
-          resolve();
-        });
-        ws.once('error', (err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-      });
+      const got = await waitForFrames(`${endpoints.ws}/ws/${listenKey}`, 8_000, 0);
+      if (!got.opened) throw new Error('соединение не открылось');
       return 'соединение установлено';
     });
-    await rest.closeListenKey().catch(() => undefined);
+    // listenKey намеренно НЕ удаляем: ключ общий для аккаунта, DELETE обрубил бы
+    // поток работающему сервису.
   }
 
   const failed = results.filter((r) => !r.ok);
@@ -159,6 +196,12 @@ async function main(): Promise<void> {
       process.stdout.write(
         '  → Обрыв соединения. Проверьте VPN/прокси; при необходимости увеличьте\n' +
           '    BINANCE_HTTP_TIMEOUT_MS и убедитесь, что BINANCE_ALLOW_HTTP2=false.\n',
+      );
+    }
+    if (f.name.startsWith('данные по публичному WebSocket')) {
+      process.stdout.write(
+        '  → WebSocket открывается, но данные не идут. Это канал: VPN или прокси\n' +
+          '    пропускает рукопожатие и глушит поток. Проверьте на прямом соединении.\n',
       );
     }
     if (/-2015|-2014/.test(f.detail)) {

@@ -30,6 +30,9 @@ export class UserDataStream {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private attempt = 0;
   private lastMessageAtMs = 0;
+  private connectedAtMs = 0;
+  private messages = 0;
+  private pings = 0;
   private closed = false;
 
   private readonly log: Logger;
@@ -51,17 +54,22 @@ export class UserDataStream {
     }, interval);
     if (typeof this.keepAliveTimer.unref === 'function') this.keepAliveTimer.unref();
 
-    const staleness = this.opts.stalenessTimeoutMs ?? 6 * 60_000;
+    // Binance шлёт ping примерно раз в 3 минуты, поэтому полная тишина дольше
+    // этого — признак мёртвого потока, даже если сокет формально открыт.
+    const staleness = this.opts.stalenessTimeoutMs ?? 200_000;
     this.stalenessTimer = setInterval(() => {
       if (this.lastMessageAtMs === 0) return;
-      if (Date.now() - this.lastMessageAtMs > staleness) {
-        this.log.warn('нет сообщений от Binance слишком долго — переподключение', {
-          silentMs: Date.now() - this.lastMessageAtMs,
+      const silentMs = Date.now() - this.lastMessageAtMs;
+      if (silentMs > staleness) {
+        this.log.warn('от Binance не пришло ни одного кадра — поток считается мёртвым', {
+          silentMs,
+          messages: this.messages,
+          pings: this.pings,
         });
         this.lastMessageAtMs = Date.now();
         this.scheduleReconnect();
       }
-    }, 30_000);
+    }, 15_000);
     if (typeof this.stalenessTimer.unref === 'function') this.stalenessTimer.unref();
   }
 
@@ -76,12 +84,15 @@ export class UserDataStream {
 
     ws.on('open', () => {
       this.attempt = 0;
-      this.log.info('user data stream подключён');
+      this.connectedAtMs = Date.now();
+      this.lastMessageAtMs = Date.now();
+      this.log.info('user data stream подключён', { listenKeySuffix: this.listenKey?.slice(-6) });
       this.opts.onConnected(this.attempt);
     });
 
     ws.on('message', (data: WebSocket.RawData) => {
       this.lastMessageAtMs = Date.now();
+      this.messages++;
       let parsed: RawUserDataEvent;
       try {
         parsed = JSON.parse(data.toString()) as RawUserDataEvent;
@@ -98,13 +109,12 @@ export class UserDataStream {
       }
     });
 
+    // ws сам отвечает pong на ping; обработчик нужен только чтобы видеть,
+    // что кадры от биржи вообще доходят.
     ws.on('ping', () => {
       this.lastMessageAtMs = Date.now();
-      try {
-        ws.pong();
-      } catch {
-        /* ignore */
-      }
+      this.pings++;
+      this.log.debug('ping от Binance', { pings: this.pings, messages: this.messages });
     });
 
     ws.on('error', (err: Error) => {
@@ -143,6 +153,25 @@ export class UserDataStream {
     if (typeof this.reconnectTimer.unref === 'function') this.reconnectTimer.unref();
   }
 
+  /**
+   * Принудительное переподключение с получением нового listenKey.
+   * Вызывается, когда поток формально жив, но данные не идут.
+   */
+  forceReconnect(reason: string): void {
+    if (this.closed) return;
+    this.log.warn('принудительное переподключение user data stream', { reason });
+    this.scheduleReconnect();
+  }
+
+  stats(): { messages: number; pings: number; connectedAtMs: number; lastMessageAtMs: number } {
+    return {
+      messages: this.messages,
+      pings: this.pings,
+      connectedAtMs: this.connectedAtMs,
+      lastMessageAtMs: this.lastMessageAtMs,
+    };
+  }
+
   async stop(): Promise<void> {
     this.closed = true;
     if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
@@ -158,9 +187,15 @@ export class UserDataStream {
       /* ignore */
     }
     this.ws = null;
-    if (this.listenKey) {
-      await this.opts.rest.closeListenKey().catch(() => undefined);
-      this.listenKey = null;
-    }
+    // listenKey НЕ удаляем намеренно.
+    //
+    // Ключ выдаётся на аккаунт, а не на соединение: POST /fapi/v1/listenKey
+    // возвращает уже существующий активный ключ. Если при остановке вызвать
+    // DELETE, он инвалидируется у ВСЕХ потребителей — включая только что
+    // запущенный экземпляр сервиса (перезапуск через `tsx watch`, Ctrl-C и
+    // немедленный старт) и сторонние приложения на том же ключе. Внешне это
+    // выглядит как «сокет подключился, но данные не идут». Ключ сам протухает
+    // через 60 минут без keepalive, поэтому чистить его вручную не нужно.
+    this.listenKey = null;
   }
 }

@@ -132,6 +132,7 @@ export class App {
         if (!engine) return;
         logger.info('состояние сервиса', {
           ...engine.stats(),
+          ws: this.stream?.stats(),
           события: Object.fromEntries(this.eventCounts),
         });
       }, cfg.statsIntervalMs);
@@ -206,7 +207,21 @@ export class App {
         this.account.fetchPositions(),
         this.account.fetchOpenOrders(),
       ]);
+      const desyncsBefore = this.engine.stats().desyncs;
       await this.bootstrapState(positions, openOrders, false);
+      const desyncsAfter = this.engine.stats().desyncs;
+
+      // Сверка увидела движение позиции, о котором WebSocket не сообщил.
+      // Значит, поток мёртв, даже если сокет открыт: пересоздаём его с новым listenKey.
+      if (desyncsAfter > desyncsBefore) {
+        const ws = this.stream?.stats();
+        logger.warn('позиция изменилась, но исполнений по WebSocket не было', {
+          сообщенийПоWS: ws?.messages ?? 0,
+          pingОтБиржи: ws?.pings ?? 0,
+        });
+        this.stream?.forceReconnect('позиция изменилась без событий WebSocket');
+      }
+
       logger.debug('сверка выполнена', { reason, positions: positions.length, openOrders: openOrders.length });
     } catch (e) {
       logger.error('сверка не удалась', { reason, error: String(e) });
@@ -243,7 +258,9 @@ export class App {
         return;
       }
       case 'listenKeyExpired': {
-        logger.warn('listenKey истёк — переподключение');
+        // Раньше здесь было только сообщение — поток оставался мёртвым навсегда.
+        logger.warn('listenKey истёк — беру новый и переподключаюсь');
+        this.stream?.forceReconnect('listenKeyExpired');
         return;
       }
       case 'ACCOUNT_CONFIG_UPDATE':
