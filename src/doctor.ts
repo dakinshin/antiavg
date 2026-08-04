@@ -7,12 +7,12 @@
 import 'dotenv/config';
 import { loadConfigFromEnv, resolveEndpoints, proxyFor } from './config.js';
 import { createRestProxyDispatcher, createWsProxyAgent, parseProxy } from './binance/proxy.js';
+import { describeProbe, probeWs } from './binance/wsProbe.js';
 import { BinanceRestClient } from './binance/rest.js';
 import { AccountService } from './binance/account.js';
 import { ExchangeInfoCache } from './binance/exchangeInfo.js';
 import { createHttpFetch } from './binance/http.js';
 import { createLogger } from './util/logger.js';
-import WebSocket from 'ws';
 
 interface StepResult {
   name: string;
@@ -22,48 +22,6 @@ interface StepResult {
 }
 
 const results: StepResult[] = [];
-
-/** Открывает WebSocket и ждёт заданное число кадров (или истечения таймаута). */
-function waitForFrames(
-  url: string,
-  timeoutMs: number,
-  needMessages: number,
-  agent?: import('node:http').Agent,
-): Promise<{ opened: boolean; messages: number; waitedMs: number }> {
-  return new Promise((resolve, reject) => {
-    const started = Date.now();
-    let opened = false;
-    let messages = 0;
-    const ws = agent ? new WebSocket(url, { agent }) : new WebSocket(url);
-
-    const finish = (err?: Error) => {
-      clearTimeout(timer);
-      try {
-        ws.removeAllListeners();
-        ws.terminate();
-      } catch {
-        /* ignore */
-      }
-      if (err) reject(err);
-      else resolve({ opened, messages, waitedMs: Date.now() - started });
-    };
-
-    const timer = setTimeout(() => {
-      if (!opened) finish(new Error(`таймаут подключения ${timeoutMs} мс`));
-      else finish();
-    }, timeoutMs);
-
-    ws.once('open', () => {
-      opened = true;
-      if (needMessages === 0) finish();
-    });
-    ws.on('message', () => {
-      messages++;
-      if (messages >= needMessages && needMessages > 0) finish();
-    });
-    ws.once('error', (err: Error) => finish(err));
-  });
-}
 
 async function step(name: string, fn: () => Promise<string>): Promise<boolean> {
   const t = Date.now();
@@ -161,43 +119,78 @@ async function main(): Promise<void> {
     return `${listenKey.slice(0, 6)}…`;
   });
 
-  // Публичный поток отвечает непрерывно — это эталон живого WebSocket.
+  // Матрица проб: публичный поток — эталон живого WebSocket, он шлёт кадры
+  // непрерывно. Проверяем обе формы адреса и оба маршрута, чтобы отделить
+  // блокировку канала от проблем с ключом.
   const wsProxy = parseProxy(proxyFor(cfg, 'ws'));
   const wsAgent = createWsProxyAgent(wsProxy);
-  const publicUrl = `${endpoints.ws}/ws/btcusdt@aggTrade`;
 
-  const directOk = await step('данные по публичному WebSocket НАПРЯМУЮ', async () => {
-    const got = await waitForFrames(publicUrl, 12_000, 1);
-    if (!got.opened) throw new Error(`соединение не открылось за ${got.waitedMs} мс`);
-    if (got.messages === 0) {
-      throw new Error(
-        `сокет открылся, но за ${got.waitedMs} мс не пришло ни одного кадра — поток глушится`,
-      );
+  const routes: Array<{ name: string; agent?: import('node:http').Agent }> = [
+    { name: 'напрямую' },
+    ...(wsProxy ? [{ name: `через ${wsProxy.url}`, agent: wsAgent }] : []),
+  ];
+  const forms = [
+    { name: '/ws/btcusdt@aggTrade', url: `${endpoints.ws}/ws/btcusdt@aggTrade` },
+    { name: '/stream?streams=…', url: `${endpoints.ws}/stream?streams=btcusdt@aggTrade` },
+  ];
+
+  process.stdout.write('\n  Публичный поток (эталон живого WebSocket):\n');
+  let anyPublicOk = false;
+  for (const route of routes) {
+    for (const form of forms) {
+      const label = `публичный WS ${form.name} ${route.name}`;
+      const probe = await probeWs(form.url, 12_000, 1, route.agent);
+      const d = describeProbe(probe);
+      anyPublicOk = anyPublicOk || d.ok;
+      results.push({ name: label, ok: d.ok, ms: probe.waitedMs, detail: d.text });
+      process.stdout.write(`  ${d.ok ? '✓' : '✗'} ${label} — ${d.text}\n`);
     }
-    return `${got.messages} сообщ. за ${got.waitedMs} мс`;
-  });
+  }
 
-  if (wsProxy) {
-    await step(`данные по публичному WebSocket ЧЕРЕЗ ПРОКСИ (${wsProxy.url})`, async () => {
-      const got = await waitForFrames(publicUrl, 15_000, 1, wsAgent);
-      if (!got.opened) throw new Error(`соединение через прокси не открылось за ${got.waitedMs} мс`);
-      if (got.messages === 0) throw new Error(`через прокси за ${got.waitedMs} мс кадров тоже нет`);
-      return `${got.messages} сообщ. за ${got.waitedMs} мс`;
-    });
-  } else if (!directOk) {
+  if (!wsProxy) {
     process.stdout.write(
-      '  · прокси не задан — укажите BINANCE_WS_PROXY, и doctor проверит его отдельным шагом\n',
+      '  · прокси не задан. Чтобы проверить туннель, запустите:\n' +
+        '      BINANCE_WS_PROXY=socks5://127.0.0.1:1080 npm run doctor\n',
     );
   }
 
   if (listenKey) {
-    await step('подключение к user data stream', async () => {
-      const got = await waitForFrames(`${endpoints.ws}/ws/${listenKey}`, 8_000, 0, wsAgent);
-      if (!got.opened) throw new Error('соединение не открылось');
-      return 'соединение установлено';
-    });
+    process.stdout.write('\n  Пользовательский поток:\n');
+    for (const route of routes) {
+      const label = `user data stream ${route.name}`;
+      // Ждём дольше: на спокойном счёте первый кадр — это ping биржи (~3 мин),
+      // поэтому «нет кадров» здесь не диагноз, важен сам факт подключения.
+      const probe = await probeWs(`${endpoints.ws}/ws/${listenKey}`, 10_000, 0, route.agent);
+      const ok = probe.opened && probe.closeCode === undefined && !probe.error;
+      const d = describeProbe(probe);
+      results.push({
+        name: label,
+        ok,
+        ms: probe.waitedMs,
+        detail: ok ? 'соединение установлено и держится' : d.text,
+      });
+      process.stdout.write(`  ${ok ? '✓' : '✗'} ${label} — ${ok ? 'подключено' : d.text}\n`);
+    }
     // listenKey намеренно НЕ удаляем: ключ общий для аккаунта, DELETE обрубил бы
     // поток работающему сервису.
+  }
+
+  if (!anyPublicOk) {
+    process.stdout.write(
+      '\n  ВЫВОД: ни один маршрут не доставляет кадры WebSocket.\n' +
+        '  Порядок действий:\n' +
+        '    1) socks5h вместо socks5 — DNS будет резолвиться на стороне прокси:\n' +
+        '         BINANCE_WS_PROXY=socks5h://127.0.0.1:1080\n' +
+        '    2) убедитесь, что на 1080 действительно SOCKS, а не HTTP (или наоборот):\n' +
+        '         curl -x socks5h://127.0.0.1:1080 https://fapi.binance.com/fapi/v1/ping\n' +
+        '         curl -x http://127.0.0.1:1080   https://fapi.binance.com/fapi/v1/ping\n' +
+        '         рабочая схема из curl — та же, что нужна в BINANCE_WS_PROXY\n' +
+        '    3) проверьте, что прокси выпускает трафик на fstream.binance.com:443,\n' +
+        '       а не только на списки доменов\n',
+    );
+  } else if (anyPublicOk) {
+    const best = results.filter((r) => r.ok && r.name.startsWith('публичный WS'));
+    process.stdout.write(`\n  Рабочий маршрут: ${best[0]?.name}\n`);
   }
 
   const failed = results.filter((r) => !r.ok);
@@ -222,20 +215,6 @@ async function main(): Promise<void> {
       process.stdout.write(
         '  → Обрыв соединения. Проверьте VPN/прокси; при необходимости увеличьте\n' +
           '    BINANCE_HTTP_TIMEOUT_MS и убедитесь, что BINANCE_ALLOW_HTTP2=false.\n',
-      );
-    }
-    if (f.name.startsWith('данные по публичному WebSocket НАПРЯМУЮ')) {
-      process.stdout.write(
-        '  → Прямой WebSocket до Binance не работает: рукопожатие проходит, кадры не идут.\n' +
-          '    Так выглядит блокировка на стороне провайдера. Пустите поток через туннель:\n' +
-          '      BINANCE_WS_PROXY=http://127.0.0.1:1080     (или socks5://127.0.0.1:1080)\n' +
-          '    REST при этом можно оставить напрямую — он проходит.\n',
-      );
-    }
-    if (f.name.startsWith('данные по публичному WebSocket ЧЕРЕЗ ПРОКСИ')) {
-      process.stdout.write(
-        '  → Через прокси кадры тоже не идут. Проверьте схему адреса (http:// против\n' +
-          '    socks5://) и что сам прокси выпускает трафик на fstream.binance.com:443.\n',
       );
     }
     if (/-2015|-2014/.test(f.detail)) {

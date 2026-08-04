@@ -122,6 +122,16 @@ export class UserDataStream {
       this.log.debug('ping от Binance', { pings: this.pings, messages: this.messages });
     });
 
+    // Сервер ответил обычным HTTP вместо upgrade (451, 403, страница провайдера).
+    ws.on('unexpected-response', (_req: unknown, res: { statusCode?: number; statusMessage?: string }) => {
+      this.log.error('вместо WebSocket пришёл HTTP-ответ', {
+        status: res?.statusCode,
+        message: res?.statusMessage,
+        подсказка: 'похоже на блокировку или прокси, не пропускающий upgrade',
+      });
+      if (!this.closed) this.scheduleReconnect();
+    });
+
     ws.on('error', (err: Error) => {
       this.log.error('ошибка WebSocket', { error: err.message });
       this.opts.onError?.(err);
@@ -135,11 +145,16 @@ export class UserDataStream {
 
   private scheduleReconnect(): void {
     if (this.closed || this.reconnectTimer) return;
-    try {
-      this.ws?.removeAllListeners();
-      this.ws?.terminate();
-    } catch {
-      /* ignore */
+    const dying = this.ws;
+    if (dying) {
+      try {
+        dying.removeAllListeners();
+        // Без обработчика поздний 'error' после terminate() уронит процесс.
+        dying.on('error', () => {});
+        dying.terminate();
+      } catch {
+        /* ignore */
+      }
     }
     this.ws = null;
 
@@ -185,11 +200,15 @@ export class UserDataStream {
     this.keepAliveTimer = null;
     this.stalenessTimer = null;
     this.reconnectTimer = null;
-    try {
-      this.ws?.removeAllListeners();
-      this.ws?.close();
-    } catch {
-      /* ignore */
+    const dying = this.ws;
+    if (dying) {
+      try {
+        dying.removeAllListeners();
+        dying.on('error', () => {});
+        dying.close();
+      } catch {
+        /* ignore */
+      }
     }
     this.ws = null;
     // listenKey НЕ удаляем намеренно.

@@ -11,6 +11,7 @@ import { WebSocketServer } from 'ws';
 import WebSocket from 'ws';
 import { createRestProxyDispatcher, createWsProxyAgent, parseProxy } from '../src/binance/proxy.js';
 import { proxyFor, testConfig } from '../src/config.js';
+import { describeProbe, probeWs } from '../src/binance/wsProbe.js';
 
 describe('разбор адреса прокси', () => {
   it('различает http и socks по схеме', () => {
@@ -115,4 +116,44 @@ describe('WebSocket через HTTP CONNECT-прокси', () => {
     expect(JSON.parse(message)).toEqual({ e: 'hello' });
     expect(connectTargets.some((t) => t.endsWith(`:${wsPort}`))).toBe(true);
   }, 15_000);
+});
+
+describe('проба WebSocket различает исходы', () => {
+  it('немедленное закрытие сервером не выдаётся за «тишину»', async () => {
+    const server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    await new Promise<void>((r) => server.once('listening', r));
+    server.on('connection', (socket) => socket.close(1008, 'нет такого потока'));
+    const port = (server.address() as AddressInfo).port;
+
+    const probe = await probeWs(`ws://127.0.0.1:${port}/ws/nope`, 5_000, 1);
+    expect(probe.messages).toBe(0);
+    expect(probe.closeCode).toBe(1008);
+    expect(describeProbe(probe).text).toContain('закрылось');
+    server.close();
+  }, 10_000);
+
+  it('HTTP-ответ вместо upgrade распознаётся отдельно', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(451);
+      res.end('blocked');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as AddressInfo).port;
+
+    const probe = await probeWs(`ws://127.0.0.1:${port}/ws/x`, 5_000, 1);
+    expect(probe.httpStatus).toBe(451);
+    expect(describeProbe(probe).text).toContain('451');
+    server.close();
+  }, 10_000);
+
+  it('живой поток отдаёт кадры', async () => {
+    const server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    await new Promise<void>((r) => server.once('listening', r));
+    server.on('connection', (socket) => socket.send('{"e":"tick"}'));
+    const port = (server.address() as AddressInfo).port;
+
+    const probe = await probeWs(`ws://127.0.0.1:${port}/ws/ok`, 5_000, 1);
+    expect(describeProbe(probe).ok).toBe(true);
+    server.close();
+  }, 10_000);
 });
