@@ -39,9 +39,15 @@ export class App {
       apiKey: deps.cfg.apiKey,
       apiSecret: deps.cfg.apiSecret,
       recvWindow: deps.cfg.recvWindow,
+      timeoutMs: deps.cfg.httpTimeoutMs,
+      allowHttp2: deps.cfg.allowHttp2,
       logger: deps.logger.child({ mod: 'rest' }),
     });
-    this.exchangeInfo = new ExchangeInfoCache(this.rest, 6 * 3600_000, deps.logger.child({ mod: 'exchangeInfo' }));
+    this.exchangeInfo = new ExchangeInfoCache(this.rest, {
+      logger: deps.logger.child({ mod: 'exchangeInfo' }),
+      fullLoadTimeoutMs: deps.cfg.exchangeInfoTimeoutMs,
+      symbolLoadTimeoutMs: Math.min(deps.cfg.httpTimeoutMs, 15_000),
+    });
     this.account = new AccountService(
       this.rest,
       deps.cfg.clientOrderIdPrefix,
@@ -68,7 +74,14 @@ export class App {
     }
 
     await this.rest.syncTime();
-    await this.exchangeInfo.load();
+
+    // Полный справочник символов весит несколько мегабайт. Если он не догрузится,
+    // старт не отменяется: фильтры нужного символа подтянутся точечно.
+    if (cfg.preloadExchangeInfo) {
+      await this.exchangeInfo.loadAllBestEffort();
+    } else {
+      logger.info('предзагрузка exchangeInfo отключена, фильтры грузятся по символам');
+    }
 
     const snapshot = await this.account.snapshot();
     this.hedgeMode = snapshot.hedgeMode;
@@ -136,6 +149,12 @@ export class App {
     engine.seedOrders(openOrders);
     engine.seedPositions(watched, openTimes);
 
+    // Прогреваем фильтры символов, по которым уже есть позиции или ордера, чтобы
+    // в момент защитного действия не ждать сеть.
+    this.exchangeInfo.warm([
+      ...new Set([...watched.map((p) => p.symbol), ...openOrders.map((o) => o.symbol)]),
+    ]);
+
     if (initial) {
       for (const p of watched) {
         const key = positionKey(p.symbol, p.positionSide);
@@ -180,6 +199,7 @@ export class App {
       case 'ORDER_TRADE_UPDATE': {
         const raw = evt as RawOrderTradeUpdate;
         if (!isSymbolWatched(cfg, raw.o.s)) return;
+        if (!this.exchangeInfo.has(raw.o.s)) this.exchangeInfo.warm([raw.o.s]);
         engine.onOrderEvent(toOrderLifecycleEvent(raw, cfg.clientOrderIdPrefix));
         if (isFillEvent(raw)) engine.onFill(toFillEvent(raw));
         return;

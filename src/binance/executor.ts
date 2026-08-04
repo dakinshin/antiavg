@@ -88,7 +88,9 @@ export class BinanceExecutor implements ProtectiveExecutor {
   }
 
   async execute(action: ProtectiveAction): Promise<ExecutionOutcome> {
-    const filters = this.opts.exchangeInfo.get(action.symbol);
+    // ensure(), а не get(): если полный exchangeInfo не догрузился при старте,
+    // фильтры символа подтянутся точечным запросом прямо здесь.
+    const filters = await this.opts.exchangeInfo.ensure(action.symbol);
     const resolved = resolveQty(action, filters, this.opts.cfg.onQtyBelowMin);
 
     if (!resolved.ok) {

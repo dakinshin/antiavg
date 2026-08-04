@@ -34,6 +34,22 @@ export const ConfigSchema = z.object({
   restBaseUrl: z.string().optional(),
   wsBaseUrl: z.string().optional(),
   recvWindow: numFromEnv(5000),
+  /** Общий таймаут одного HTTP-запроса к Binance, мс. */
+  httpTimeoutMs: numFromEnv(20_000),
+  /** Таймаут полной загрузки exchangeInfo (несколько мегабайт), мс. */
+  exchangeInfoTimeoutMs: numFromEnv(60_000),
+  /**
+   * Разрешить HTTP/2. По умолчанию выключено: на больших ответах через VPN и прокси
+   * H2-поток регулярно рвётся с «TypeError: terminated».
+   */
+  allowHttp2: boolFromEnv.default(false),
+  /**
+   * Грузить полный справочник символов при старте. Если false (или если загрузка
+   * не удалась), фильтры догружаются точечно по каждому символу.
+   */
+  preloadExchangeInfo: boolFromEnv.default(true),
+  /** Пауза перед повторной попыткой запуска при сетевой ошибке, мс. 0 — не повторять. */
+  startupRetryMs: numFromEnv(15_000),
 
   /** --- Что охраняем --- */
   /** Пустой список = все символы. */
@@ -129,6 +145,11 @@ export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config 
     restBaseUrl: env.BINANCE_REST_URL || undefined,
     wsBaseUrl: env.BINANCE_WS_URL || undefined,
     recvWindow: env.BINANCE_RECV_WINDOW,
+    httpTimeoutMs: env.BINANCE_HTTP_TIMEOUT_MS,
+    exchangeInfoTimeoutMs: env.BINANCE_EXCHANGE_INFO_TIMEOUT_MS,
+    allowHttp2: env.BINANCE_ALLOW_HTTP2 ?? 'false',
+    preloadExchangeInfo: env.ANTIAVG_PRELOAD_EXCHANGE_INFO ?? 'true',
+    startupRetryMs: env.ANTIAVG_STARTUP_RETRY_MS,
 
     symbols: env.ANTIAVG_SYMBOLS,
     excludeSymbols: env.ANTIAVG_EXCLUDE_SYMBOLS,
