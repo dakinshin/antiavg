@@ -57,7 +57,9 @@ export class UserDataStream {
         this.scheduleReconnect();
       });
     }, interval);
-    if (typeof this.keepAliveTimer.unref === 'function') this.keepAliveTimer.unref();
+    // ВАЖНО: без unref. Пока поток активен, эти таймеры обязаны держать процесс
+    // живым — иначе на переподключении, когда сокета уже нет, а нового ещё нет,
+    // событийный цикл пустеет и Node молча завершается. Останавливаются в stop().
 
     // Binance шлёт ping примерно раз в 3 минуты, поэтому полная тишина дольше
     // этого — признак мёртвого потока, даже если сокет формально открыт.
@@ -75,7 +77,6 @@ export class UserDataStream {
         this.scheduleReconnect();
       }
     }, 15_000);
-    if (typeof this.stalenessTimer.unref === 'function') this.stalenessTimer.unref();
   }
 
   private async connect(): Promise<void> {
@@ -175,7 +176,6 @@ export class UserDataStream {
         this.scheduleReconnect();
       });
     }, delay + jitter);
-    if (typeof this.reconnectTimer.unref === 'function') this.reconnectTimer.unref();
   }
 
   /**

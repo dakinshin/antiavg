@@ -81,6 +81,14 @@ export class Engine {
    */
   private readonly lastFillAtMs = new Map<PositionKey, number>();
 
+  /**
+   * Уже обработанные сделки (`symbol:tradeId`).
+   * Одно исполнение приходит дважды: сперва быстрым TRADE_LITE, затем полным
+   * ORDER_TRADE_UPDATE. Реагируем на первое, второе отбрасываем.
+   */
+  private readonly seenTrades = new Set<string>();
+  private readonly seenTradesOrder: string[] = [];
+
   /** Открытые ордера на момент предыдущей сверки — для вычисления кандидатов. */
   private prevOpenOrders = new Map<number, OrderRecord>();
   private filledCandidates: OrderRecord[] = [];
@@ -91,6 +99,7 @@ export class Engine {
 
   private stopped = false;
   private fills = 0;
+  private duplicateFills = 0;
   private restDetections = 0;
   private detections = 0;
   private staleSnapshots = 0;
@@ -315,6 +324,36 @@ export class Engine {
   /** Обработка исполнения — основная точка входа детекции. */
   onFill(fill: FillEvent): DetectionResult {
     const key = positionKey(fill.symbol, fill.positionSide);
+
+    if (fill.tradeId > 0) {
+      const tradeKey = `${fill.symbol}:${fill.tradeId}`;
+      if (this.seenTrades.has(tradeKey)) {
+        this.duplicateFills++;
+        this.log.debug('сделка уже обработана, повтор отброшен', {
+          symbol: fill.symbol,
+          tradeId: fill.tradeId,
+          источник: fill.orderStatus,
+        });
+        return {
+          detected: false,
+          reason: 'not-an-increase',
+          before: { qty: 0, entryPrice: 0 },
+          after: { qty: 0, entryPrice: 0 },
+          addedQty: 0,
+          fillPrice: fill.lastFilledPrice,
+          adverseDeviationPct: 0,
+          fill,
+        };
+      }
+      this.seenTrades.add(tradeKey);
+      this.seenTradesOrder.push(tradeKey);
+      // Держим окно ограниченным: повтор приходит в пределах секунд.
+      while (this.seenTradesOrder.length > 5000) {
+        const oldest = this.seenTradesOrder.shift();
+        if (oldest) this.seenTrades.delete(oldest);
+      }
+    }
+
     this.fills++;
     // Время по часам БИРЖИ: с ним сравниваются снимки, чтобы не применить устаревший.
     this.lastFillAtMs.set(key, fill.tradeTimeMs || fill.eventTimeMs || this.now());
@@ -592,6 +631,7 @@ export class Engine {
     fills: number;
     detections: number;
     restDetections: number;
+    дубликатовСделок: number;
     staleSnapshots: number;
     desyncs: number;
     действийЗаЧас: number;
@@ -603,6 +643,7 @@ export class Engine {
       detections: this.detections,
       staleSnapshots: this.staleSnapshots,
       restDetections: this.restDetections,
+      дубликатовСделок: this.duplicateFills,
       desyncs: this.desyncs,
       действийЗаЧас: this.actionTimestamps.length,
       предохранитель: this.tripped ? 'СРАБОТАЛ' : 'ок',

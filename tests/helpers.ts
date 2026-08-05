@@ -145,7 +145,14 @@ export interface FillEventInit {
   origQty?: number;
   reduceOnly?: boolean;
   orderStatus?: string;
+  /** У каждого частичного исполнения свой tradeId — как на бирже. */
+  tradeId?: number;
   timeMs: number;
+}
+
+let tradeIdSeq = 500000;
+export function nextTradeId(): number {
+  return ++tradeIdSeq;
 }
 
 /** Событие исполнения (x = TRADE). */
@@ -171,7 +178,7 @@ export function fillEvent(init: FillEventInit): RawOrderTradeUpdate {
       z: String(init.cumQty ?? init.lastQty),
       L: String(init.lastPrice),
       T: init.timeMs,
-      t: init.orderId * 10,
+      t: init.tradeId ?? nextTradeId(),
       ps: init.positionSide ?? 'BOTH',
       R: init.reduceOnly ?? false,
       cp: false,

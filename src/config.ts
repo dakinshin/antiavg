@@ -146,6 +146,11 @@ export const ConfigSchema = z.object({
   statsIntervalMs: numFromEnv(300_000),
   /** Периодическая сверка состояния с REST, мс (0 — выключено). */
   reconcileIntervalMs: numFromEnv(60_000),
+  /**
+   * Насколько долго WebSocket должен молчать, чтобы расхождение при сверке
+   * считалось признаком мёртвого потока, а не гонкой снимка и исполнения.
+   */
+  desyncReconnectSilenceMs: numFromEnv(20_000),
   /** Задержка применения снимка из ACCOUNT_UPDATE, мс. */
   snapshotApplyDelayMs: numFromEnv(1500),
   /** Интервал keepalive listenKey, мс. */
@@ -246,6 +251,7 @@ export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config 
     logRawEvents: env.ANTIAVG_LOG_RAW_EVENTS ?? 'false',
     statsIntervalMs: env.ANTIAVG_STATS_INTERVAL_MS,
     reconcileIntervalMs: env.ANTIAVG_RECONCILE_INTERVAL_MS,
+    desyncReconnectSilenceMs: env.ANTIAVG_DESYNC_RECONNECT_SILENCE_MS,
     snapshotApplyDelayMs: env.ANTIAVG_SNAPSHOT_APPLY_DELAY_MS,
     listenKeyKeepAliveMs: env.ANTIAVG_LISTEN_KEY_KEEPALIVE_MS,
   };

@@ -63,6 +63,27 @@ export interface RawAccountUpdate {
   };
 }
 
+/**
+ * Сырое событие TRADE_LITE — облегчённая и БОЛЕЕ БЫСТРАЯ версия ORDER_TRADE_UPDATE.
+ * Полей меньше: нет positionSide и нет reduceOnly.
+ */
+export interface RawTradeLite {
+  e: 'TRADE_LITE';
+  E: number;
+  T: number;
+  s: string;
+  q: string;
+  p: string;
+  m?: boolean;
+  c?: string;
+  S: OrderSide;
+  L: string;
+  l: string;
+  t: number;
+  i: number;
+  [k: string]: unknown;
+}
+
 export type RawUserDataEvent =
   | RawOrderTradeUpdate
   | RawAccountUpdate
@@ -128,6 +149,50 @@ export function toFillEvent(raw: RawOrderTradeUpdate): FillEvent {
     price: toNum(o.p),
     stopPrice: toNum(o.sp),
     orderStatus: o.X,
+  };
+}
+
+/**
+ * TRADE_LITE -> FillEvent.
+ *
+ * В событии нет positionSide и reduceOnly, поэтому недостающее берём из реестра
+ * ордеров. В hedge mode без записи об ордере сторону позиции определить нельзя —
+ * тогда возвращаем undefined и ждём полноценный ORDER_TRADE_UPDATE.
+ */
+export function tradeLiteToFillEvent(
+  raw: RawTradeLite,
+  order: OrderRecord | undefined,
+  hedgeMode: boolean,
+): FillEvent | undefined {
+  let positionSide: PositionSide;
+  if (order) {
+    positionSide = order.positionSide;
+  } else if (!hedgeMode) {
+    positionSide = 'BOTH';
+  } else {
+    return undefined;
+  }
+
+  return {
+    eventTimeMs: raw.E,
+    tradeTimeMs: raw.T ?? raw.E,
+    symbol: raw.s,
+    positionSide,
+    side: raw.S,
+    orderId: raw.i,
+    clientOrderId: raw.c ?? order?.clientOrderId ?? '',
+    tradeId: raw.t ?? 0,
+    lastFilledQty: toNum(raw.l),
+    lastFilledPrice: toNum(raw.L),
+    cumFilledQty: toNum(raw.l),
+    type: order?.type ?? 'MARKET',
+    origType: order?.origType ?? 'MARKET',
+    reduceOnly: order?.reduceOnly ?? false,
+    closePosition: order?.closePosition ?? false,
+    origQty: toNum(raw.q),
+    price: toNum(raw.p),
+    stopPrice: order?.stopPrice ?? 0,
+    orderStatus: 'TRADE_LITE',
   };
 }
 

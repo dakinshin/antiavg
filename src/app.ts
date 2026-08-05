@@ -16,8 +16,10 @@ import {
   toFillEvent,
   toOrderLifecycleEvent,
   toPositionSnapshots,
+  tradeLiteToFillEvent,
   type RawAccountUpdate,
   type RawOrderTradeUpdate,
+  type RawTradeLite,
   type RawUserDataEvent,
 } from './binance/mappers.js';
 import { Engine } from './core/engine.js';
@@ -159,7 +161,6 @@ export class App {
       this.reconcileTimer = setInterval(() => {
         void this.reconcile('по расписанию');
       }, cfg.reconcileIntervalMs);
-      if (typeof this.reconcileTimer.unref === 'function') this.reconcileTimer.unref();
     }
 
     if (cfg.statsIntervalMs > 0) {
@@ -172,7 +173,6 @@ export class App {
           события: Object.fromEntries(this.eventCounts),
         });
       }, cfg.statsIntervalMs);
-      if (typeof this.statsTimer.unref === 'function') this.statsTimer.unref();
     }
 
     logger.info('сервис готов, слежу за усреднением в убытке');
@@ -251,11 +251,19 @@ export class App {
       // Значит, поток мёртв, даже если сокет открыт: пересоздаём его с новым listenKey.
       if (desyncsAfter > desyncsBefore) {
         const ws = this.stream?.stats();
+        const silentMs = ws?.lastMessageAtMs ? Date.now() - ws.lastMessageAtMs : Number.MAX_SAFE_INTEGER;
         logger.warn('позиция изменилась, но исполнений по WebSocket не было', {
           сообщенийПоWS: ws?.messages ?? 0,
           pingОтБиржи: ws?.pings ?? 0,
+          молчитМс: silentMs,
         });
-        this.stream?.forceReconnect('позиция изменилась без событий WebSocket');
+        // Расхождение может быть просто гонкой: снимок REST успел уйти раньше,
+        // чем пришло исполнение. Пересоздаём поток только если он и правда молчит.
+        if (silentMs > this.deps.cfg.desyncReconnectSilenceMs) {
+          this.stream?.forceReconnect('позиция изменилась, поток молчит');
+        } else {
+          logger.info('поток активен — считаю расхождение гонкой сверки, переподключение не нужно');
+        }
       }
 
       logger.debug('сверка выполнена', { reason, positions: positions.length, openOrders: openOrders.length });
@@ -299,9 +307,20 @@ export class App {
         this.stream?.forceReconnect('listenKeyExpired');
         return;
       }
+      case 'TRADE_LITE': {
+        // TRADE_LITE приходит РАНЬШЕ ORDER_TRADE_UPDATE и иногда оказывается
+        // единственным сообщением о сделке. Реагируем по нему, дубликат
+        // отсеивается по tradeId.
+        const raw = evt as RawTradeLite;
+        if (!isSymbolWatched(cfg, raw.s)) return;
+        const fill = tradeLiteToFillEvent(raw, engine.orders.get(raw.i), this.hedgeMode);
+        if (fill) engine.onFill(fill);
+        else logger.debug('TRADE_LITE без известного ордера в hedge mode — жду ORDER_TRADE_UPDATE', { symbol: raw.s });
+        return;
+      }
       case 'ACCOUNT_CONFIG_UPDATE':
       case 'MARGIN_CALL':
-      case 'TRADE_LITE':
+      case 'ALGO_UPDATE':
       case 'STRATEGY_UPDATE':
       case 'GRID_UPDATE':
       case 'CONDITIONAL_ORDER_TRIGGER_REJECT':
