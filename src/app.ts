@@ -99,6 +99,15 @@ export class App {
     });
     if (cfg.dryRun) {
       logger.warn('DRY RUN включён — реальные ордера отправляться не будут (ANTIAVG_DRY_RUN=false для боевого режима)');
+    } else {
+      logger.warn('=== БОЕВОЙ РЕЖИМ: сервис будет отправлять РЕАЛЬНЫЕ рыночные ордера ===', {
+        реакция: cfg.reactionMode === 'close' ? 'закрывать позицию целиком' : 'срезать добавленный объём',
+        символы: cfg.symbols.length ? cfg.symbols : 'ВСЕ',
+        порогУбыткаПроц: cfg.lossThresholdPct,
+        сеткаДоОткрытия: cfg.countPreexistingOrders ? 'считается усреднением' : 'не считается',
+        позицииДоЗапуска: cfg.unknownOpenTimePolicy === 'skip' ? 'не трогаем' : 'РЕАГИРУЕМ',
+        предохранительВЧас: cfg.maxActionsPerHour || 'выключен',
+      });
     }
 
     await this.rest.syncTime();

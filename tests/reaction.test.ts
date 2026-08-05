@@ -221,3 +221,79 @@ describe('hedge mode', () => {
     expect(h.engine.positions.get(SYM, 'SHORT').qty).toBe(-1);
   });
 });
+
+describe('предохранитель', () => {
+  it('останавливает защитные действия после лимита за час', async () => {
+    const h = makeHarness({ maxActionsPerHour: 3, cooldownMs: 0 });
+
+    for (let i = 0; i < 6; i++) {
+      const openId = nextOrderId();
+      feed(h.engine, newOrderEvent({ orderId: openId, side: 'BUY', qty: 10, type: 'MARKET', timeMs: h.clock.now() }));
+      feed(h.engine, fillEvent({ orderId: openId, side: 'BUY', lastQty: 10, lastPrice: 50000, type: 'MARKET', timeMs: h.clock.now() }));
+      h.clock.advance(1000);
+
+      const addId = nextOrderId();
+      feed(h.engine, newOrderEvent({ orderId: addId, side: 'BUY', qty: 1, type: 'MARKET', timeMs: h.clock.now() }));
+      feed(h.engine, fillEvent({ orderId: addId, side: 'BUY', lastQty: 1, lastPrice: 45000, type: 'MARKET', timeMs: h.clock.now() }));
+      await h.engine.flushAll();
+
+      // Закрываем позицию, чтобы следующий цикл начинался с нуля.
+      const closeId = nextOrderId();
+      feed(h.engine, newOrderEvent({ orderId: closeId, side: 'SELL', qty: 11, type: 'MARKET', reduceOnly: true, timeMs: h.clock.now() }));
+      feed(h.engine, fillEvent({ orderId: closeId, side: 'SELL', lastQty: 11, lastPrice: 46000, type: 'MARKET', reduceOnly: true, timeMs: h.clock.now() }));
+      h.clock.advance(1000);
+    }
+
+    expect(h.executor.actions).toHaveLength(3);
+    expect(h.engine.stats().предохранитель).toBe('СРАБОТАЛ');
+    expect(h.logs.some((l) => l.msg.startsWith('ПРЕДОХРАНИТЕЛЬ'))).toBe(true);
+  });
+
+  it('через час счётчик освобождается', async () => {
+    const h = makeHarness({ maxActionsPerHour: 1, cooldownMs: 0 });
+
+    const trigger = async () => {
+      const openId = nextOrderId();
+      feed(h.engine, newOrderEvent({ orderId: openId, side: 'BUY', qty: 10, type: 'MARKET', timeMs: h.clock.now() }));
+      feed(h.engine, fillEvent({ orderId: openId, side: 'BUY', lastQty: 10, lastPrice: 50000, type: 'MARKET', timeMs: h.clock.now() }));
+      h.clock.advance(1000);
+      const addId = nextOrderId();
+      feed(h.engine, newOrderEvent({ orderId: addId, side: 'BUY', qty: 1, type: 'MARKET', timeMs: h.clock.now() }));
+      feed(h.engine, fillEvent({ orderId: addId, side: 'BUY', lastQty: 1, lastPrice: 45000, type: 'MARKET', timeMs: h.clock.now() }));
+      await h.engine.flushAll();
+      const closeId = nextOrderId();
+      feed(h.engine, newOrderEvent({ orderId: closeId, side: 'SELL', qty: 11, type: 'MARKET', reduceOnly: true, timeMs: h.clock.now() }));
+      feed(h.engine, fillEvent({ orderId: closeId, side: 'SELL', lastQty: 11, lastPrice: 46000, type: 'MARKET', reduceOnly: true, timeMs: h.clock.now() }));
+    };
+
+    await trigger();
+    expect(h.executor.actions).toHaveLength(1);
+
+    h.clock.advance(30 * 60_000);
+    await trigger();
+    expect(h.executor.actions).toHaveLength(1); // лимит ещё держит
+
+    h.clock.advance(31 * 60_000);
+    await trigger();
+    expect(h.executor.actions).toHaveLength(2); // час прошёл
+  });
+
+  it('без лимита предохранитель не мешает', async () => {
+    const h = makeHarness({ maxActionsPerHour: 0, cooldownMs: 0 });
+    for (let i = 0; i < 5; i++) {
+      const openId = nextOrderId();
+      feed(h.engine, newOrderEvent({ orderId: openId, side: 'BUY', qty: 10, type: 'MARKET', timeMs: h.clock.now() }));
+      feed(h.engine, fillEvent({ orderId: openId, side: 'BUY', lastQty: 10, lastPrice: 50000, type: 'MARKET', timeMs: h.clock.now() }));
+      h.clock.advance(1000);
+      const addId = nextOrderId();
+      feed(h.engine, newOrderEvent({ orderId: addId, side: 'BUY', qty: 1, type: 'MARKET', timeMs: h.clock.now() }));
+      feed(h.engine, fillEvent({ orderId: addId, side: 'BUY', lastQty: 1, lastPrice: 45000, type: 'MARKET', timeMs: h.clock.now() }));
+      await h.engine.flushAll();
+      const closeId = nextOrderId();
+      feed(h.engine, newOrderEvent({ orderId: closeId, side: 'SELL', qty: 11, type: 'MARKET', reduceOnly: true, timeMs: h.clock.now() }));
+      feed(h.engine, fillEvent({ orderId: closeId, side: 'SELL', lastQty: 11, lastPrice: 46000, type: 'MARKET', reduceOnly: true, timeMs: h.clock.now() }));
+      h.clock.advance(1000);
+    }
+    expect(h.executor.actions).toHaveLength(5);
+  });
+});

@@ -85,6 +85,10 @@ export class Engine {
   private prevOpenOrders = new Map<number, OrderRecord>();
   private filledCandidates: OrderRecord[] = [];
 
+  /** Времена отправленных защитных действий — для часового предохранителя. */
+  private readonly actionTimestamps: number[] = [];
+  private tripped = false;
+
   private stopped = false;
   private fills = 0;
   private restDetections = 0;
@@ -478,6 +482,29 @@ export class Engine {
     }
 
     const nowMs = this.now();
+
+    // Предохранитель. Если защитных ордеров за час стало больше лимита, значит
+    // что-то идёт не так: лучше остановиться и разбудить человека, чем молотить
+    // рыночными ордерами по счёту.
+    if (this.cfg.maxActionsPerHour > 0) {
+      const hourAgo = nowMs - 3600_000;
+      while (this.actionTimestamps.length > 0 && this.actionTimestamps[0]! < hourAgo) {
+        this.actionTimestamps.shift();
+      }
+      if (this.actionTimestamps.length >= this.cfg.maxActionsPerHour) {
+        if (!this.tripped) {
+          this.tripped = true;
+          this.log.error('ПРЕДОХРАНИТЕЛЬ: защитные действия остановлены', {
+            заЧас: this.actionTimestamps.length,
+            лимит: this.cfg.maxActionsPerHour,
+            что_делать:
+              'проверьте логи и позиции вручную; лимит меняется через ANTIAVG_MAX_ACTIONS_PER_HOUR',
+          });
+        }
+        return null;
+      }
+    }
+
     const last = this.lastActionAtMs.get(key);
     if (last !== undefined && nowMs - last < this.cfg.cooldownMs) {
       this.log.warn('cooldown, защитное действие пропущено', { key, sinceMs: nowMs - last });
@@ -508,6 +535,7 @@ export class Engine {
 
     this.inFlight.add(key);
     this.lastActionAtMs.set(key, nowMs);
+    this.actionTimestamps.push(nowMs);
     try {
       const outcome = await this.executor.execute(action);
       this.hooks.onAction?.(action, outcome);
@@ -566,6 +594,8 @@ export class Engine {
     restDetections: number;
     staleSnapshots: number;
     desyncs: number;
+    действийЗаЧас: number;
+    предохранитель: string;
     openPositions: number;
   } {
     return {
@@ -574,6 +604,8 @@ export class Engine {
       staleSnapshots: this.staleSnapshots,
       restDetections: this.restDetections,
       desyncs: this.desyncs,
+      действийЗаЧас: this.actionTimestamps.length,
+      предохранитель: this.tripped ? 'СРАБОТАЛ' : 'ок',
       openPositions: this.positions.open().length,
     };
   }
