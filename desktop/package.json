@@ -2,7 +2,7 @@
   "name": "antiavg-desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Окно и трей для AntiAvg",
+  "description": "Окно и трей для AntiAvg — защиты от усреднения в убытке",
   "main": "build/main.js",
   "type": "module",
   "scripts": {
@@ -12,11 +12,17 @@
     "start": "npm run build && electron .",
     "dev": "npm run build && electron . --dev",
     "dist": "npm run build && electron-builder --win --mac",
-    "dist:win": "npm run build && electron-builder --win"
+    "dist:win": "npm run build && electron-builder --win",
+    "fix:wincodesign": "powershell -ExecutionPolicy Bypass -File scripts/fix-wincodesign.ps1",
+    "dist:win:noedit": "npm run build && electron-builder --win -c.win.signAndEditExecutable=false"
   },
   "devDependencies": {
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8",
     "typescript": "^5.7.3"
+  },
+  "author": {
+    "name": "beakid",
+    "email": "dima@beakid.com"
   }
 }

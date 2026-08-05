@@ -1,7 +1,12 @@
 appId: com.beakid.antiavg
 productName: AntiAvg
+copyright: © 2026 beakid
+
 directories:
   output: release
+  # ВАЖНО: не `build` — там лежит скомпилированный main-процесс.
+  buildResources: build-resources
+
 files:
   - build/**/*
   - renderer/**/*
@@ -23,14 +28,21 @@ files:
       - smart-buffer/**/*
       - debug/**/*
       - ms/**/*
+
 win:
   target: nsis
+  icon: build-resources/icon.ico
   artifactName: AntiAvg-${version}-setup.${ext}
+
 nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
   shortcutName: AntiAvg
+  installerIcon: build-resources/icon.ico
+  uninstallerIcon: build-resources/icon.ico
+
 mac:
   target: dmg
+  icon: build-resources/icon.png
   category: public.app-category.finance

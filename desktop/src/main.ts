@@ -113,6 +113,7 @@ function createWindow(): void {
     minHeight: 600,
     backgroundColor: '#0d0d0d',
     title: 'AntiAvg',
+    icon: path.join(here, '..', 'build-resources', 'icon.png'),
     show: false,
     webPreferences: {
       preload: path.join(here, '..', 'preload.cjs'),
