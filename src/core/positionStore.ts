@@ -39,6 +39,7 @@ export class PositionStore {
         entryPrice: 0,
         openedAtMs: null,
         openTimeKnown: true, // позиции нет — «время открытия» тривиально известно
+        openedByOrderId: null,
         updatedAtMs: 0,
       };
       this.positions.set(key, p);
@@ -68,6 +69,7 @@ export class PositionStore {
     signedDelta: number,
     price: number,
     atMs: number,
+    orderId: number | null = null,
   ): ApplyFillResult {
     const p = this.get(symbol, positionSide);
     const before = { qty: p.qty, entryPrice: p.entryPrice };
@@ -87,12 +89,18 @@ export class PositionStore {
       p.entryPrice = price;
       p.openedAtMs = atMs;
       p.openTimeKnown = true;
+      p.openedByOrderId = orderId;
       opened = !isZero(next);
     } else if (sameSign(p.qty, signedDelta)) {
       // Долив в ту же сторону — пересчёт средней.
-      const notional = Math.abs(p.qty) * p.entryPrice + Math.abs(signedDelta) * price;
-      const totalQty = Math.abs(p.qty) + Math.abs(signedDelta);
-      p.entryPrice = totalQty > 0 ? notional / totalQty : price;
+      // Долив по той же цене НЕ пересчитываем: деление вносит ошибку порядка
+      // 1e-18, из-за которой средняя оказывается «чуть выше» цены и следующий
+      // долив по той же цене выглядит убыточным.
+      if (Math.abs(price - p.entryPrice) > Math.abs(p.entryPrice) * 1e-12) {
+        const notional = Math.abs(p.qty) * p.entryPrice + Math.abs(signedDelta) * price;
+        const totalQty = Math.abs(p.qty) + Math.abs(signedDelta);
+        p.entryPrice = totalQty > 0 ? notional / totalQty : price;
+      }
       p.qty = next;
       increased = true;
       addedQty = Math.abs(signedDelta);
@@ -102,6 +110,7 @@ export class PositionStore {
       p.entryPrice = 0;
       p.openedAtMs = null;
       p.openTimeKnown = true;
+      p.openedByOrderId = null;
       closed = true;
     } else if (sameSign(next, p.qty)) {
       // Частичное закрытие — средняя не меняется.
@@ -112,6 +121,7 @@ export class PositionStore {
       p.entryPrice = price;
       p.openedAtMs = atMs;
       p.openTimeKnown = true;
+      p.openedByOrderId = orderId;
       flipped = true;
     }
 
@@ -145,6 +155,7 @@ export class PositionStore {
     if (isFlat) {
       p.openedAtMs = null;
       p.openTimeKnown = true;
+      p.openedByOrderId = null;
     } else if (openTimeHint) {
       p.openedAtMs = openTimeHint.openedAtMs;
       p.openTimeKnown = openTimeHint.openTimeKnown;
@@ -152,10 +163,12 @@ export class PositionStore {
       // Позиция появилась «из ниоткуда» (мы пропустили исполнения) — время неизвестно.
       p.openedAtMs = atMs;
       p.openTimeKnown = false;
+      p.openedByOrderId = null;
     } else if (!sameSign(prevQty, qty)) {
       // Переворот, замеченный только по снимку.
       p.openedAtMs = atMs;
       p.openTimeKnown = false;
+      p.openedByOrderId = null;
     }
 
     return { changed, prevQty };

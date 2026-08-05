@@ -255,6 +255,7 @@ export class Engine {
       entryPrice: prev.entryPrice,
       openedAtMs: prev.openedAtMs,
       openTimeKnown: prev.openTimeKnown,
+      openedByOrderId: prev.openedByOrderId,
     };
 
     // Кандидат-ордер: из тех, что исчезли или доисполнились между сверками,
@@ -366,6 +367,7 @@ export class Engine {
       entryPrice: p.entryPrice,
       openedAtMs: p.openedAtMs,
       openTimeKnown: p.openTimeKnown,
+      openedByOrderId: p.openedByOrderId,
     };
 
     const signedDelta = fill.side === 'BUY' ? fill.lastFilledQty : -fill.lastFilledQty;
@@ -375,6 +377,7 @@ export class Engine {
       signedDelta,
       fill.lastFilledPrice,
       fill.tradeTimeMs || fill.eventTimeMs || this.now(),
+      fill.orderId,
     );
 
     const result = analyzeFill({ cfg: this.cfg, fill, order, before, applied });

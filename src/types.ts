@@ -76,6 +76,11 @@ export interface PositionState {
   openedAtMs: number | null;
   /** true, если openedAtMs достоверно известен (позиция открылась при работающем сервисе или восстановлена по сделкам). */
   openTimeKnown: boolean;
+  /**
+   * Ордер, которым позиция была открыта. Его последующие частичные исполнения —
+   * это то же самое вхождение, а не долив: усреднением они быть не могут.
+   */
+  openedByOrderId: number | null;
   /** Время последнего изменения (мс). */
   updatedAtMs: number;
 }
@@ -132,6 +137,7 @@ export type AveragingSkipReason =
   | 'not-in-loss'
   | 'below-loss-threshold'
   | 'pre-existing-order'
+  | 'same-entry-order'
   | 'unknown-open-time'
   | 'liquidation-or-adl'
   | 'own-order'
