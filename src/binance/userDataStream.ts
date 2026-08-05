@@ -8,6 +8,8 @@ import type { RawUserDataEvent } from './mappers.js';
 export interface UserDataStreamOptions {
   rest: BinanceRestClient;
   wsBaseUrl: string;
+  /** Путь пользовательского потока, например /private/ws (без listenKey). */
+  wsPrivatePath?: string;
   keepAliveMs: number;
   logger?: Logger;
   /** Пересоздание WebSocket — подменяется в тестах. */
@@ -79,7 +81,8 @@ export class UserDataStream {
   private async connect(): Promise<void> {
     if (this.closed) return;
     this.listenKey = await this.opts.rest.createListenKey();
-    const url = `${this.opts.wsBaseUrl}/ws/${this.listenKey}`;
+    const path = this.opts.wsPrivatePath ?? '/private/ws';
+    const url = `${this.opts.wsBaseUrl}${path}/${this.listenKey}`;
     const agent = this.opts.wsAgent;
     const factory =
       this.opts.wsFactory ?? ((u: string) => (agent ? new WebSocket(u, { agent }) : new WebSocket(u)));
@@ -91,7 +94,9 @@ export class UserDataStream {
       this.attempt = 0;
       this.connectedAtMs = Date.now();
       this.lastMessageAtMs = Date.now();
-      this.log.info('user data stream подключён', { listenKeySuffix: this.listenKey?.slice(-6) });
+      this.log.info('user data stream подключён', {
+        url: `${this.opts.wsBaseUrl}${this.opts.wsPrivatePath ?? '/private/ws'}/…${this.listenKey?.slice(-6)}`,
+      });
       this.opts.onConnected(this.attempt);
     });
 

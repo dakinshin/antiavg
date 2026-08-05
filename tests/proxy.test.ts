@@ -6,12 +6,19 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import net from 'node:net';
+import zlib from 'node:zlib';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
 import WebSocket from 'ws';
-import { createRestProxyDispatcher, createWsProxyAgent, parseProxy } from '../src/binance/proxy.js';
+import {
+  createRestFetch,
+  createRestProxyDispatcher,
+  createWsProxyAgent,
+  parseProxy,
+} from '../src/binance/proxy.js';
 import { proxyFor, testConfig } from '../src/config.js';
 import { describeProbe, probeWs } from '../src/binance/wsProbe.js';
+import { createNodeFetch } from '../src/binance/nodeFetch.js';
 
 describe('разбор адреса прокси', () => {
   it('различает http и socks по схеме', () => {
@@ -34,8 +41,15 @@ describe('разбор адреса прокси', () => {
     expect(() => parseProxy('ftp://127.0.0.1:21')).toThrow(/схема/i);
   });
 
-  it('REST через SOCKS сообщает об ограничении, а не молчит', () => {
-    expect(() => createRestProxyDispatcher(parseProxy('socks5://127.0.0.1:1080'))).toThrow(/SOCKS/);
+  it('для SOCKS используется node:https, а не диспетчер undici', () => {
+    // undici не умеет SOCKS, поэтому диспетчера нет — вместо него отдельный транспорт.
+    expect(createRestProxyDispatcher(parseProxy('socks5://127.0.0.1:1080'))).toBeUndefined();
+    expect(createRestFetch(parseProxy('socks5://127.0.0.1:1080'))).toBeTypeOf('function');
+  });
+
+  it('для http-прокси используется диспетчер undici', () => {
+    expect(createRestProxyDispatcher(parseProxy('http://127.0.0.1:1080'))).toBeDefined();
+    expect(createRestFetch(parseProxy('http://127.0.0.1:1080'))).toBeUndefined();
   });
 
   it('точечная настройка перекрывает общую', () => {
@@ -154,6 +168,65 @@ describe('проба WebSocket различает исходы', () => {
 
     const probe = await probeWs(`ws://127.0.0.1:${port}/ws/ok`, 5_000, 1);
     expect(describeProbe(probe).ok).toBe(true);
+    server.close();
+  }, 10_000);
+});
+
+describe('REST-транспорт через node:https (нужен для SOCKS)', () => {
+  it('получает тело и статус', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ serverTime: 42 }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as AddressInfo).port;
+
+    const f = createNodeFetch({});
+    const res = await f(`http://127.0.0.1:${port}/fapi/v1/time`, { method: 'GET', headers: {} });
+    expect(res.ok).toBe(true);
+    expect(JSON.parse(await res.text())).toEqual({ serverTime: 42 });
+    server.close();
+  }, 10_000);
+
+  it('распаковывает gzip', async () => {
+    const payload = JSON.stringify({ symbols: ['BTCUSDT'] });
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-encoding': 'gzip' });
+      res.end(zlib.gzipSync(Buffer.from(payload)));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as AddressInfo).port;
+
+    const f = createNodeFetch({});
+    const res = await f(`http://127.0.0.1:${port}/x`, { method: 'GET', headers: {} });
+    expect(await res.text()).toBe(payload);
+    server.close();
+  }, 10_000);
+
+  it('ошибочный статус не выдаётся за успех', async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(451);
+      res.end('{"code":-1,"msg":"blocked"}');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as AddressInfo).port;
+
+    const f = createNodeFetch({});
+    const res = await f(`http://127.0.0.1:${port}/x`, { method: 'GET', headers: {} });
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe(451);
+    server.close();
+  }, 10_000);
+
+  it('таймаут заголовков срабатывает, а не висит вечно', async () => {
+    const server = http.createServer(() => {
+      /* молчим намеренно */
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as AddressInfo).port;
+
+    const f = createNodeFetch({ headersTimeoutMs: 200 });
+    await expect(f(`http://127.0.0.1:${port}/x`, { method: 'GET', headers: {} })).rejects.toThrow(/таймаут/);
     server.close();
   }, 10_000);
 });

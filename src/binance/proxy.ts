@@ -10,6 +10,8 @@ import type { Agent as HttpAgent } from 'node:http';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { ProxyAgent as UndiciProxyAgent, type Dispatcher } from 'undici';
+import { createNodeFetch } from './nodeFetch.js';
+import type { HttpFetch } from './http.js';
 
 export type ProxyKind = 'http' | 'socks';
 
@@ -66,17 +68,26 @@ export function createWsProxyAgent(proxy: ParsedProxy | undefined): HttpAgent | 
     : (new HttpsProxyAgent(proxy.url) as unknown as HttpAgent);
 }
 
-/**
- * Диспетчер undici для REST. undici умеет только HTTP-прокси; для SOCKS
- * сообщаем об этом явно, а не молча ходим напрямую.
- */
+/** Диспетчер undici для HTTP-прокси. Для SOCKS undici не подходит — см. createRestFetch. */
 export function createRestProxyDispatcher(proxy: ParsedProxy | undefined): Dispatcher | undefined {
-  if (!proxy) return undefined;
-  if (proxy.kind === 'socks') {
-    throw new Error(
-      'REST через SOCKS-прокси не поддерживается. Укажите http-прокси в BINANCE_REST_PROXY ' +
-        'либо оставьте REST напрямую, а через SOCKS пустите только WebSocket (BINANCE_WS_PROXY).',
-    );
-  }
+  if (!proxy || proxy.kind === 'socks') return undefined;
   return new UndiciProxyAgent({ uri: proxy.url });
+}
+
+/**
+ * Транспорт REST с учётом прокси.
+ *
+ * SOCKS undici не умеет, поэтому для него берём node:https с SocksProxyAgent —
+ * так REST работает через любой туннель, а не только через CONNECT.
+ * Возвращает undefined, когда прокси не нужен: тогда используется обычный undici.
+ */
+export function createRestFetch(
+  proxy: ParsedProxy | undefined,
+  timeouts: { headersTimeoutMs?: number; bodyTimeoutMs?: number } = {},
+): HttpFetch | undefined {
+  if (!proxy || proxy.kind !== 'socks') return undefined;
+  return createNodeFetch({
+    agent: new SocksProxyAgent(proxy.url),
+    ...timeouts,
+  });
 }

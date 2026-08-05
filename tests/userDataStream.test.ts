@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type WebSocket from 'ws';
 import { UserDataStream } from '../src/binance/userDataStream.js';
 import type { BinanceRestClient } from '../src/binance/rest.js';
+import { marketStreamUrl, resolveEndpoints, testConfig, userStreamUrl } from '../src/config.js';
 
 class FakeSocket extends EventEmitter {
   terminated = false;
@@ -180,5 +181,37 @@ describe('обнаружение мёртвого потока', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('адрес пользовательского потока', () => {
+  it('по умолчанию используется /private/ws — корневой путь отключён 2026-04-23', () => {
+    const endpoints = resolveEndpoints(testConfig());
+    expect(endpoints.wsPrivatePath).toBe('/private/ws');
+    expect(endpoints.wsMarketPath).toBe('/market/ws');
+    expect(userStreamUrl(endpoints, 'KEY123')).toBe('wss://fstream.binance.com/private/ws/KEY123');
+    expect(marketStreamUrl(endpoints, 'btcusdt@aggTrade')).toBe(
+      'wss://fstream.binance.com/market/ws/btcusdt@aggTrade',
+    );
+  });
+
+  it('путь переопределяется настройкой', () => {
+    const endpoints = resolveEndpoints(testConfig({ wsPrivatePath: '/ws' }));
+    expect(userStreamUrl(endpoints, 'K')).toBe('wss://fstream.binance.com/ws/K');
+  });
+
+  it('поток подключается именно по новому пути', async () => {
+    const urls: string[] = [];
+    const h = makeStream({
+      wsPrivatePath: '/private/ws',
+      wsFactory: (u: string) => {
+        urls.push(u);
+        const s = new FakeSocket();
+        return s as unknown as WebSocket;
+      },
+    });
+    await h.stream.start();
+    expect(urls[0]).toBe('wss://example.invalid/private/ws/KEY1');
+    await h.stream.stop();
   });
 });

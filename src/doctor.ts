@@ -5,7 +5,7 @@
  * рвётся связь — время ответа, размер тела, коды ошибок Binance.
  */
 import 'dotenv/config';
-import { loadConfigFromEnv, resolveEndpoints, proxyFor } from './config.js';
+import { loadConfigFromEnv, resolveEndpoints, proxyFor, userStreamUrl } from './config.js';
 import { createRestProxyDispatcher, createWsProxyAgent, parseProxy } from './binance/proxy.js';
 import { describeProbe, probeWs } from './binance/wsProbe.js';
 import { BinanceRestClient } from './binance/rest.js';
@@ -47,7 +47,7 @@ async function main(): Promise<void> {
 
   process.stdout.write(`\nДиагностика AntiAveraging\n`);
   process.stdout.write(`  REST: ${endpoints.rest}\n`);
-  process.stdout.write(`  WS:   ${endpoints.ws}\n`);
+  process.stdout.write(`  WS:   ${endpoints.ws}${endpoints.wsPrivatePath}/<listenKey>\n`);
   process.stdout.write(`  HTTP/2: ${cfg.allowHttp2 ? 'разрешён' : 'выключен (HTTP/1.1)'}\n`);
   process.stdout.write(`  Таймаут запроса: ${cfg.httpTimeoutMs} мс\n`);
   process.stdout.write(`  Прокси REST: ${proxyFor(cfg, 'rest') ?? 'напрямую'}\n`);
@@ -130,8 +130,8 @@ async function main(): Promise<void> {
     ...(wsProxy ? [{ name: `через ${wsProxy.url}`, agent: wsAgent }] : []),
   ];
   const forms = [
-    { name: '/ws/btcusdt@aggTrade', url: `${endpoints.ws}/ws/btcusdt@aggTrade` },
-    { name: '/stream?streams=…', url: `${endpoints.ws}/stream?streams=btcusdt@aggTrade` },
+    { name: `${endpoints.wsMarketPath}/… (новый)`, url: `${endpoints.ws}${endpoints.wsMarketPath}/btcusdt@aggTrade` },
+    { name: '/ws/… (устаревший)', url: `${endpoints.ws}/ws/btcusdt@aggTrade` },
   ];
 
   process.stdout.write('\n  Публичный поток (эталон живого WebSocket):\n');
@@ -160,7 +160,7 @@ async function main(): Promise<void> {
       const label = `user data stream ${route.name}`;
       // Ждём дольше: на спокойном счёте первый кадр — это ping биржи (~3 мин),
       // поэтому «нет кадров» здесь не диагноз, важен сам факт подключения.
-      const probe = await probeWs(`${endpoints.ws}/ws/${listenKey}`, 10_000, 0, route.agent);
+      const probe = await probeWs(userStreamUrl(endpoints, listenKey), 10_000, 0, route.agent);
       const ok = probe.opened && probe.closeCode === undefined && !probe.error;
       const d = describeProbe(probe);
       results.push({

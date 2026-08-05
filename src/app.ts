@@ -5,7 +5,12 @@ import { ExchangeInfoCache } from './binance/exchangeInfo.js';
 import { AccountService } from './binance/account.js';
 import { BinanceExecutor } from './binance/executor.js';
 import { UserDataStream } from './binance/userDataStream.js';
-import { createRestProxyDispatcher, createWsProxyAgent, parseProxy } from './binance/proxy.js';
+import {
+  createRestFetch,
+  createRestProxyDispatcher,
+  createWsProxyAgent,
+  parseProxy,
+} from './binance/proxy.js';
 import {
   isFillEvent,
   toFillEvent,
@@ -50,7 +55,17 @@ export class App {
       timeoutMs: deps.cfg.httpTimeoutMs,
       allowHttp2: deps.cfg.allowHttp2,
       logger: deps.logger.child({ mod: 'rest' }),
-      ...(restProxy ? { dispatcher: createRestProxyDispatcher(restProxy) } : {}),
+      ...(restProxy && restProxy.kind === 'http'
+        ? { dispatcher: createRestProxyDispatcher(restProxy) }
+        : {}),
+      ...(restProxy && restProxy.kind === 'socks'
+        ? {
+            fetchImpl: createRestFetch(restProxy, {
+              headersTimeoutMs: Math.min(deps.cfg.httpTimeoutMs, 20_000),
+              bodyTimeoutMs: deps.cfg.exchangeInfoTimeoutMs,
+            })!,
+          }
+        : {}),
     });
     this.exchangeInfo = new ExchangeInfoCache(this.rest, {
       logger: deps.logger.child({ mod: 'exchangeInfo' }),
@@ -71,7 +86,7 @@ export class App {
     logger.info('запуск anti-averaging', {
       testnet: cfg.testnet,
       rest: endpoints.rest,
-      ws: endpoints.ws,
+      ws: `${endpoints.ws}${endpoints.wsPrivatePath}`,
       прокси: {
         rest: this.restProxyLabel ?? 'напрямую',
         ws: proxyFor(cfg, 'ws') ?? 'напрямую',
@@ -120,6 +135,7 @@ export class App {
     this.stream = new UserDataStream({
       rest: this.rest,
       wsBaseUrl: endpoints.ws,
+      wsPrivatePath: endpoints.wsPrivatePath,
       keepAliveMs: cfg.listenKeyKeepAliveMs,
       logger: logger.child({ mod: 'ws' }),
       ...(wsAgent ? { wsAgent } : {}),

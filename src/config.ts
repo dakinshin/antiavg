@@ -33,6 +33,10 @@ export const ConfigSchema = z.object({
   testnet: boolFromEnv.default(false),
   restBaseUrl: z.string().optional(),
   wsBaseUrl: z.string().optional(),
+  /** Путь пользовательского потока. По умолчанию /private/ws (после разделения URL). */
+  wsPrivatePath: z.string().optional(),
+  /** Путь рыночных потоков. По умолчанию /market/ws. */
+  wsMarketPath: z.string().optional(),
   recvWindow: numFromEnv(5000),
   /** Общий таймаут одного HTTP-запроса к Binance, мс. */
   httpTimeoutMs: numFromEnv(20_000),
@@ -150,16 +154,45 @@ export const PROD_WS = 'wss://fstream.binance.com';
 export const TESTNET_REST = 'https://testnet.binancefuture.com';
 export const TESTNET_WS = 'wss://stream.binancefuture.com';
 
+/**
+ * Разделение базовых URL WebSocket (анонс Binance от 2026-03-06).
+ *
+ * Раньше и рыночные, и пользовательские потоки жили в корне: `/ws` и `/stream`.
+ * С 2026-04-23 корневые пути окончательно отключены, трафик разведён по типам:
+ *   рыночные данные   -> /market/ws/<поток>,  /market/stream?streams=...
+ *   пользовательские  -> /private/ws/<listenKey>, /private/stream
+ * Подключение к отключённому пути внешне выглядит как «сокет открыт, кадров нет».
+ */
+export const WS_PRIVATE_PATH = '/private/ws';
+export const WS_MARKET_PATH = '/market/ws';
+export const WS_LEGACY_PATH = '/ws';
+
 export interface ResolvedEndpoints {
   rest: string;
   ws: string;
+  /** Полный путь к пользовательскому потоку без listenKey. */
+  wsPrivatePath: string;
+  /** Полный путь к рыночным потокам без имени потока. */
+  wsMarketPath: string;
 }
 
 export function resolveEndpoints(cfg: Config): ResolvedEndpoints {
   return {
     rest: cfg.restBaseUrl ?? (cfg.testnet ? TESTNET_REST : PROD_REST),
     ws: cfg.wsBaseUrl ?? (cfg.testnet ? TESTNET_WS : PROD_WS),
+    wsPrivatePath: cfg.wsPrivatePath ?? WS_PRIVATE_PATH,
+    wsMarketPath: cfg.wsMarketPath ?? WS_MARKET_PATH,
   };
+}
+
+/** Адрес пользовательского потока. */
+export function userStreamUrl(endpoints: ResolvedEndpoints, listenKey: string): string {
+  return `${endpoints.ws}${endpoints.wsPrivatePath}/${listenKey}`;
+}
+
+/** Адрес рыночного потока. */
+export function marketStreamUrl(endpoints: ResolvedEndpoints, stream: string): string {
+  return `${endpoints.ws}${endpoints.wsMarketPath}/${stream}`;
 }
 
 export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config {
@@ -169,6 +202,8 @@ export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config 
     testnet: env.BINANCE_TESTNET ?? 'false',
     restBaseUrl: env.BINANCE_REST_URL || undefined,
     wsBaseUrl: env.BINANCE_WS_URL || undefined,
+    wsPrivatePath: env.BINANCE_WS_PRIVATE_PATH || undefined,
+    wsMarketPath: env.BINANCE_WS_MARKET_PATH || undefined,
     recvWindow: env.BINANCE_RECV_WINDOW,
     httpTimeoutMs: env.BINANCE_HTTP_TIMEOUT_MS,
     exchangeInfoTimeoutMs: env.BINANCE_EXCHANGE_INFO_TIMEOUT_MS,

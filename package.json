@@ -14,7 +14,8 @@
     "doctor": "tsx src/doctor.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "netcheck": "tsx src/netcheck.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
