@@ -1,6 +1,6 @@
-appId: com.beakid.antiavg
+appId: io.avanpost.antiavg
 productName: AntiAvg
-copyright: © 2026 beakid
+copyright: © 2026 Avanpost.io
 
 directories:
   output: release
@@ -31,6 +31,7 @@ files:
 
 win:
   target: nsis
+  publisherName: Avanpost.io
   icon: build-resources/icon.ico
   artifactName: AntiAvg-${version}-setup.${ext}
 

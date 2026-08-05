@@ -111,6 +111,7 @@ export class Guard {
   private starting = false;
   private alarmUntilMs = 0;
   private dryRun = true;
+  private autoRetryCancelled = false;
 
   constructor(
     private readonly onChange: () => void,
@@ -256,7 +257,34 @@ export class Guard {
     }
   }
 
+  /**
+   * Автозапуск с повторами.
+   *
+   * При старте вместе с системой сеть может быть ещё не поднята, и одна
+   * неудачная попытка оставила бы защиту выключенной до тех пор, пока человек
+   * не заметит. Поэтому пробуем несколько раз с нарастающей паузой.
+   * Пользовательская остановка повторы отменяет.
+   */
+  async startWithRetry(settings: Settings, attempts = 8): Promise<void> {
+    this.autoRetryCancelled = false;
+    for (let i = 1; i <= attempts; i++) {
+      if (this.autoRetryCancelled) return;
+      const res = await this.start(settings);
+      if (res.ok) return;
+      if (i === attempts) {
+        this.push('error', `защита не запустилась за ${attempts} попыток — включите вручную`);
+        this.onChange();
+        return;
+      }
+      const delay = Math.min(60_000, 5_000 * i);
+      this.push('warn', `повтор запуска через ${Math.round(delay / 1000)} с (попытка ${i} из ${attempts})`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+
   async stop(): Promise<void> {
+    // Явная остановка отменяет и запланированные повторы автозапуска.
+    this.autoRetryCancelled = true;
     const app = this.app;
     this.app = null;
     this.startedAtMs = null;

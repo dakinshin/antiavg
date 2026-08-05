@@ -18,6 +18,12 @@ let tray: Tray | null = null;
 /** true только после подтверждённого выхода — иначе окно просто прячется. */
 let allowQuit = false;
 let settings: Settings = { ...DEFAULT_SETTINGS };
+/**
+ * Запуск вместе с системой не должен разворачивать окно на весь экран.
+ * На Windows опция openAsHidden игнорируется (она только для macOS), поэтому
+ * автозапуск помечается собственным аргументом.
+ */
+const startHidden = process.argv.includes('--hidden');
 
 // Один экземпляр: два процесса на одном счёте отработали бы один долив дважды.
 if (!app.requestSingleInstanceLock()) {
@@ -126,7 +132,8 @@ function createWindow(): void {
   void win.loadFile(path.join(here, '..', 'renderer', 'index.html'));
 
   win.once('ready-to-show', () => {
-    win?.show();
+    // При автозапуске окно не показываем — приложение живёт в трее.
+    if (!startHidden) win?.show();
     pushState();
   });
 
@@ -182,7 +189,12 @@ ipcMain.handle('settings:save', async (_e, incoming: Partial<Settings>) => {
   const res = saveSettings(next);
   settings = next;
 
-  app.setLoginItemSettings({ openAtLogin: next.launchOnLogin, openAsHidden: true });
+  app.setLoginItemSettings({
+    openAtLogin: next.launchOnLogin,
+    // openAsHidden работает только на macOS; на Windows роль играет аргумент.
+    openAsHidden: true,
+    args: ['--hidden'],
+  });
 
   const needsRestart = guard.isRunning();
   return { ...res, needsRestart };
@@ -202,7 +214,8 @@ app.whenReady().then(() => {
   createWindow();
 
   if (settings.autoStartGuard && settings.apiKey && settings.apiSecret) {
-    void guard.start(settings);
+    // С повторами: при старте вместе с системой сеть может быть ещё не готова.
+    void guard.startWithRetry(settings);
   }
 
   app.on('activate', () => showWindow());
