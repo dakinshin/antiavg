@@ -1,6 +1,6 @@
 import type { Config } from '../config.js';
 import { isSymbolWatched } from '../config.js';
-import { analyzeFill, SKIP_REASON_TEXT } from './detector.js';
+import { analyzeFill, analyzePendingOrder, SKIP_REASON_TEXT } from './detector.js';
 import { OrderRegistry } from './orderRegistry.js';
 import { PositionStore } from './positionStore.js';
 import { isZero, round8, sameSign } from '../util/num.js';
@@ -12,9 +12,11 @@ import {
   type FillEvent,
   type OrderLifecycleEvent,
   type PositionKey,
+  type PositionSide,
   type PositionSnapshot,
   type PositionState,
   type OrderRecord,
+  type PendingOrderVerdict,
   type ProtectiveAction,
 } from '../types.js';
 
@@ -31,6 +33,8 @@ export interface ExecutionOutcome {
 export interface ProtectiveExecutor {
   /** Отправляет защитный рыночный ордер. */
   execute(action: ProtectiveAction): Promise<ExecutionOutcome>;
+  /** Снимает конкретный ордер (профилактика). */
+  cancelOrder?(symbol: string, orderId: number): Promise<{ cancelled: boolean; reason?: string }>;
   /** Отменяет все открытые ордера по символу (опционально). */
   cancelOpenOrders?(symbol: string): Promise<void>;
 }
@@ -39,6 +43,8 @@ export interface EngineHooks {
   onDetection?(d: DetectionResult): void;
   onSkip?(d: DetectionResult): void;
   onAction?(a: ProtectiveAction, outcome: ExecutionOutcome): void;
+  /** Снят опасный ордер, который при срабатывании стал бы усреднением. */
+  onOrderCancelled?(v: PendingOrderVerdict, cancelled: boolean): void;
 }
 
 export interface EngineOptions {
@@ -97,6 +103,10 @@ export class Engine {
   private readonly actionTimestamps: number[] = [];
   private tripped = false;
 
+  /** Ордера, по которым отмена уже отправлена — чтобы не долбить повторно. */
+  private readonly cancelRequested = new Set<number>();
+  private cancelledOrders = 0;
+
   private stopped = false;
   private fills = 0;
   private duplicateFills = 0;
@@ -119,8 +129,71 @@ export class Engine {
     const terminal = ['CANCELED', 'FILLED', 'EXPIRED', 'REJECTED', 'EXPIRED_IN_MATCH'];
     if (terminal.includes(evt.orderStatus)) {
       this.orders.markClosed(evt.order.orderId, this.now());
+      this.cancelRequested.delete(evt.order.orderId);
+    } else {
+      // Новый или изменённый ордер — сразу проверяем, не станет ли он усреднением.
+      void this.reviewPendingOrders(evt.order.symbol, evt.order.positionSide);
     }
     this.orders.sweep(this.now());
+  }
+
+  /**
+   * Профилактика: снимает ещё не исполненные ордера, которые при срабатывании
+   * стали бы усреднением в убытке.
+   *
+   * Проверять нужно не только при появлении ордера: средняя цена входа двигается
+   * с каждым доливом, и ордер, безобидный вчера, может стать усредняющим сегодня.
+   * Поэтому вызывается и после каждого изменения позиции.
+   */
+  async reviewPendingOrders(symbol: string, positionSide: PositionSide): Promise<void> {
+    if (!this.cfg.cancelDangerousOrders || this.stopped) return;
+    if (!this.executor.cancelOrder) return;
+
+    const pos = this.positions.peek(symbol, positionSide);
+    if (!pos || isZero(pos.qty)) return;
+
+    for (const order of this.orders.all()) {
+      if (order.symbol !== symbol || order.positionSide !== positionSide) continue;
+      if (this.cancelRequested.has(order.orderId)) continue;
+
+      const verdict = analyzePendingOrder(this.cfg, order, {
+        qty: pos.qty,
+        entryPrice: pos.entryPrice,
+        openedAtMs: pos.openedAtMs,
+        openTimeKnown: pos.openTimeKnown,
+      });
+      if (!verdict.dangerous) continue;
+
+      this.cancelRequested.add(order.orderId);
+      this.log.warn('снимаю ордер: при срабатывании стал бы усреднением в убытке', {
+        symbol,
+        positionSide,
+        orderId: order.orderId,
+        тип: order.origType,
+        сторона: order.side,
+        ценаОрдера: round8(verdict.price),
+        средняяВхода: round8(pos.entryPrice),
+        хужеВходаНаПроц: round8(verdict.adverseDeviationPct),
+        объём: round8(order.origQty - order.executedQty),
+      });
+
+      try {
+        const res = await this.executor.cancelOrder(symbol, order.orderId);
+        if (res.cancelled) this.cancelledOrders++;
+        this.hooks.onOrderCancelled?.(verdict, res.cancelled);
+        if (!res.cancelled && res.reason !== 'dry-run') {
+          this.log.info('ордер снять не удалось', { orderId: order.orderId, причина: res.reason });
+        }
+      } catch (e) {
+        // Не удалось — снимаем метку, чтобы попробовать на следующем событии.
+        this.cancelRequested.delete(order.orderId);
+        this.log.error('ошибка при отмене ордера', {
+          symbol,
+          orderId: order.orderId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
   }
 
   /** Загрузка снимка открытых ордеров при старте / сверке. */
@@ -217,6 +290,11 @@ export class Engine {
         openTimeKnown: openedAtMs !== null,
       });
     }
+    // Сверка могла принести новые заявки или изменить среднюю — перепроверяем.
+    for (const p of this.positions.open()) {
+      void this.reviewPendingOrders(p.symbol, p.positionSide);
+    }
+
     // Позиции, которых больше нет в снимке, считаем закрытыми.
     for (const p of this.positions.all()) {
       const key = positionKey(p.symbol, p.positionSide);
@@ -381,6 +459,10 @@ export class Engine {
     );
 
     const result = analyzeFill({ cfg: this.cfg, fill, order, before, applied });
+
+    // Средняя цена входа сдвинулась — ордер, безобидный минуту назад, мог стать
+    // усредняющим. Перепроверяем висящие заявки по этой позиции.
+    void this.reviewPendingOrders(fill.symbol, fill.positionSide);
 
     // Каждое исполнение видно на уровне info: без этого невозможно понять,
     // почему сервис молчит.
@@ -634,6 +716,7 @@ export class Engine {
     fills: number;
     detections: number;
     restDetections: number;
+    снятоОрдеров: number;
     дубликатовСделок: number;
     staleSnapshots: number;
     desyncs: number;
@@ -646,6 +729,7 @@ export class Engine {
       detections: this.detections,
       staleSnapshots: this.staleSnapshots,
       restDetections: this.restDetections,
+      снятоОрдеров: this.cancelledOrders,
       дубликатовСделок: this.duplicateFills,
       desyncs: this.desyncs,
       действийЗаЧас: this.actionTimestamps.length,

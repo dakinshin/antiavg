@@ -27,10 +27,18 @@ export class RecordingExecutor implements ProtectiveExecutor {
   readonly actions: ProtectiveAction[] = [];
   outcome: ExecutionOutcome = { executed: true, orderId: 1 };
   readonly cancelled: string[] = [];
+  /** Идентификаторы точечно снятых ордеров (профилактика). */
+  readonly cancelledOrderIds: number[] = [];
+  cancelOutcome: { cancelled: boolean; reason?: string } = { cancelled: true };
 
   async execute(action: ProtectiveAction): Promise<ExecutionOutcome> {
     this.actions.push(action);
     return { ...this.outcome, sentQty: action.requestedQty };
+  }
+
+  async cancelOrder(_symbol: string, orderId: number): Promise<{ cancelled: boolean; reason?: string }> {
+    this.cancelledOrderIds.push(orderId);
+    return this.cancelOutcome;
   }
 
   async cancelOpenOrders(symbol: string): Promise<void> {
@@ -44,6 +52,7 @@ export class RecordingExecutor implements ProtectiveExecutor {
   reset(): void {
     this.actions.length = 0;
     this.cancelled.length = 0;
+    this.cancelledOrderIds.length = 0;
   }
 }
 

@@ -1,7 +1,13 @@
 import type { Config } from '../config.js';
 import { isSymbolWatched } from '../config.js';
 import type { ApplyFillResult } from './positionStore.js';
-import type { AveragingSkipReason, DetectionResult, FillEvent, OrderRecord } from '../types.js';
+import type {
+  AveragingSkipReason,
+  DetectionResult,
+  FillEvent,
+  OrderRecord,
+  PendingOrderVerdict,
+} from '../types.js';
 
 export const LIQUIDATION_CLIENT_ID_PREFIXES = ['autoclose-', 'adl_autoclose'];
 
@@ -19,6 +25,7 @@ export const SKIP_REASON_TEXT: Record<AveragingSkipReason, string> = {
   'reduce-only': 'ордер reduceOnly, позицию увеличить не может',
   'symbol-not-watched': 'символ вне списка наблюдения',
   cooldown: 'действие подавлено паузой между реакциями',
+  'no-usable-price': 'цену исполнения ордера определить нельзя',
 };
 
 export interface PositionBefore {
@@ -133,4 +140,89 @@ export function analyzeFill(input: AnalyzeInput): DetectionResult {
     fill,
     ...(order ? { order } : {}),
   };
+}
+
+/**
+ * Цена, по которой ордер предположительно исполнится.
+ * Для трейлинг-стопа она неизвестна заранее — такие ордера не оцениваем.
+ */
+export function pendingOrderPrice(o: OrderRecord): number | null {
+  const type = o.origType || o.type;
+  switch (type) {
+    case 'LIMIT':
+      return o.price > 0 ? o.price : null;
+    case 'STOP':
+    case 'TAKE_PROFIT':
+      // Стоп-лимит: исполнится по лимитной цене, если она задана.
+      return o.price > 0 ? o.price : o.stopPrice > 0 ? o.stopPrice : null;
+    case 'STOP_MARKET':
+    case 'TAKE_PROFIT_MARKET':
+      return o.stopPrice > 0 ? o.stopPrice : null;
+    default:
+      return null;
+  }
+}
+
+export interface PendingPosition {
+  qty: number;
+  entryPrice: number;
+  openedAtMs: number | null;
+  openTimeKnown: boolean;
+}
+
+function pendingSkip(
+  reason: AveragingSkipReason,
+  order: OrderRecord,
+  price = 0,
+  deviation = 0,
+): PendingOrderVerdict {
+  return { dangerous: false, reason, price, adverseDeviationPct: deviation, order };
+}
+
+/**
+ * Профилактическое правило: опасен ли ещё не исполненный ордер.
+ *
+ * Тот же критерий, что и для состоявшегося долива, но вместо цены сделки берётся
+ * цена, по которой ордер сработает. Смысл в том, чтобы снять заявку ДО
+ * исполнения: это дешевле реакции постфактум — не нужно рыночного ордера, нет
+ * проскальзывания и зафиксированного убытка.
+ */
+export function analyzePendingOrder(
+  cfg: Config,
+  order: OrderRecord,
+  pos: PendingPosition,
+): PendingOrderVerdict {
+  if (!isSymbolWatched(cfg, order.symbol)) return pendingSkip('symbol-not-watched', order);
+  if (order.own) return pendingSkip('own-order', order);
+  // Такие ордера позицию увеличить не могут по определению.
+  if (order.reduceOnly || order.closePosition) return pendingSkip('reduce-only', order);
+
+  // Нет позиции — нечего усреднять: этот ордер её только откроет.
+  if (Math.abs(pos.qty) <= 0) return pendingSkip('position-was-flat', order);
+
+  const increases = pos.qty > 0 ? order.side === 'BUY' : order.side === 'SELL';
+  if (!increases) return pendingSkip('not-an-increase', order);
+
+  const price = pendingOrderPrice(order);
+  if (price === null || price <= 0) return pendingSkip('no-usable-price', order);
+
+  const deviation = adverseDeviationPct(pos.qty, pos.entryPrice, price);
+  if (deviation <= PRICE_NOISE_PCT) return pendingSkip('not-in-loss', order, price, deviation);
+  if (deviation < Math.max(cfg.lossThresholdPct, PRICE_NOISE_PCT)) {
+    return pendingSkip('below-loss-threshold', order, price, deviation);
+  }
+  if (order.origQty - order.executedQty < cfg.minAveragingQty) {
+    return pendingSkip('not-an-increase', order, price, deviation);
+  }
+
+  // То же освобождение, что и для исполнений: сетка, выставленная до входа, — норма.
+  if (!cfg.countPreexistingOrders) {
+    if (!pos.openTimeKnown || pos.openedAtMs === null) {
+      if (cfg.unknownOpenTimePolicy === 'skip') return pendingSkip('unknown-open-time', order, price, deviation);
+    } else if (order.placedAtMs < pos.openedAtMs) {
+      return pendingSkip('pre-existing-order', order, price, deviation);
+    }
+  }
+
+  return { dangerous: true, price, adverseDeviationPct: deviation, order };
 }

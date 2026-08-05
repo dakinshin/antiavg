@@ -20,6 +20,7 @@ export interface Settings {
   lossThresholdPct: number;
   countPreexistingOrders: boolean;
   unknownOpenTimePolicy: 'skip' | 'react';
+  cancelDangerousOrders: boolean;
   symbols: string;
   maxActionsPerHour: number;
   onQtyBelowMin: 'skip' | 'close';
@@ -38,6 +39,7 @@ export const DEFAULT_SETTINGS: Settings = {
   lossThresholdPct: 0,
   countPreexistingOrders: false,
   unknownOpenTimePolicy: 'skip',
+  cancelDangerousOrders: true,
   symbols: '',
   maxActionsPerHour: 30,
   onQtyBelowMin: 'skip',

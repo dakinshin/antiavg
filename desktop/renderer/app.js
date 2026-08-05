@@ -228,7 +228,7 @@ function renderChart() {
 const FIELDS = {
   sApiKey: 'apiKey', sApiSecret: 'apiSecret', sTestnet: 'testnet', sDryRun: 'dryRun',
   sReaction: 'reactionMode', sThreshold: 'lossThresholdPct', sGrid: 'countPreexistingOrders',
-  sUnknown: 'unknownOpenTimePolicy', sSymbols: 'symbols', sMaxActions: 'maxActionsPerHour',
+  sUnknown: 'unknownOpenTimePolicy', sCancelOrders: 'cancelDangerousOrders', sSymbols: 'symbols', sMaxActions: 'maxActionsPerHour',
   sBelowMin: 'onQtyBelowMin', sWsProxy: 'wsProxy', sRestProxy: 'restProxy',
   sLaunch: 'launchOnLogin', sAutoGuard: 'autoStartGuard',
 };

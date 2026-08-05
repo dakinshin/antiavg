@@ -165,6 +165,7 @@ export class Guard {
       lossThresholdPct: s.lossThresholdPct,
       countPreexistingOrders: s.countPreexistingOrders,
       unknownOpenTimePolicy: s.unknownOpenTimePolicy,
+      cancelDangerousOrders: s.cancelDangerousOrders,
       symbols: s.symbols,
       maxActionsPerHour: s.maxActionsPerHour,
       onQtyBelowMin: s.onQtyBelowMin,
@@ -224,6 +225,14 @@ export class Guard {
               ? `защитный ордер отправлен: ${a.side} ${qty} по рынку`
               : `защитное действие не выполнено (${outcome?.skipped ?? outcome?.error ?? 'причина неизвестна'})`;
             this.push('action', text, { symbol: a.symbol, amount: -qty });
+            this.onChange();
+          },
+          onOrderCancelled: (v: any, cancelled: boolean) => {
+            this.push(cancelled ? 'action' : 'warn', cancelled
+              ? `снят ордер на ${v.order?.side} по ${v.price} — стал бы усреднением`
+              : `ордер на ${v.order?.side} по ${v.price} снять не удалось`, {
+              symbol: v.order?.symbol,
+            });
             this.onChange();
           },
           onSkip: (d: any) => {

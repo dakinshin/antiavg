@@ -132,6 +132,12 @@ export const ConfigSchema = z.object({
    * Ограничивает ущерб от ошибки в логике или от шторма событий. 0 — без лимита.
    */
   maxActionsPerHour: numFromEnv(30),
+  /**
+   * Профилактика: снимать ещё не исполненные лимитные и стоп-ордера, которые
+   * при срабатывании стали бы усреднением в убытке. Дешевле реакции постфактум —
+   * не нужно рыночного ордера и нет проскальзывания.
+   */
+  cancelDangerousOrders: boolFromEnv.default(true),
   /** Отменять оставшиеся открытые ордера по символу после реакции. */
   cancelOpenOrdersOnReaction: boolFromEnv.default(false),
   /** Префикс clientOrderId для собственных защитных ордеров. */
@@ -242,6 +248,7 @@ export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config 
     aggregationWindowMs: env.ANTIAVG_AGGREGATION_WINDOW_MS,
     cooldownMs: env.ANTIAVG_COOLDOWN_MS,
     onQtyBelowMin: env.ANTIAVG_ON_QTY_BELOW_MIN ?? 'skip',
+    cancelDangerousOrders: env.ANTIAVG_CANCEL_DANGEROUS_ORDERS ?? 'true',
     maxActionsPerHour: env.ANTIAVG_MAX_ACTIONS_PER_HOUR,
     cancelOpenOrdersOnReaction: env.ANTIAVG_CANCEL_OPEN_ORDERS ?? 'false',
     clientOrderIdPrefix: env.ANTIAVG_CLIENT_ORDER_ID_PREFIX ?? 'antiavg',

@@ -143,7 +143,8 @@ export type AveragingSkipReason =
   | 'own-order'
   | 'reduce-only'
   | 'symbol-not-watched'
-  | 'cooldown';
+  | 'cooldown'
+  | 'no-usable-price';
 
 /** Результат анализа одного fill. */
 export interface DetectionResult {
@@ -162,6 +163,17 @@ export interface DetectionResult {
   fill: FillEvent;
   /** Ордер, породивший fill (если известен). */
   order?: OrderRecord;
+}
+
+/** Вердикт по ещё не исполненному ордеру. */
+export interface PendingOrderVerdict {
+  dangerous: boolean;
+  reason?: AveragingSkipReason;
+  /** Цена, по которой ордер предположительно исполнится. */
+  price: number;
+  /** Насколько эта цена хуже средней входа, в процентах. */
+  adverseDeviationPct: number;
+  order: OrderRecord;
 }
 
 export type ReactionMode = 'reduce' | 'close';

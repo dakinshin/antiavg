@@ -11,6 +11,12 @@ import { noopLogger } from '../util/logger.js';
 /** Коды Binance, означающие «позиция уже закрыта / нечего уменьшать». */
 const BENIGN_CODES = new Set([-2022, -2027, -4003, -1106]);
 
+/**
+ * Коды, означающие «ордера уже нет»: он исполнился, отменён пользователем или
+ * истёк, пока мы принимали решение. Это штатный исход гонки, не ошибка.
+ */
+const ORDER_GONE_CODES = new Set([-2011, -2013]);
+
 export interface QtyResolution {
   ok: boolean;
   qty: number;
@@ -154,6 +160,24 @@ export class BinanceExecutor implements ProtectiveExecutor {
           message: e.message,
         });
         return { executed: false, skipped: 'position-flat', error: e.message };
+      }
+      throw e;
+    }
+  }
+
+  /** Снимает конкретный ордер. Уже исчезнувший ордер ошибкой не считается. */
+  async cancelOrder(symbol: string, orderId: number): Promise<{ cancelled: boolean; reason?: string }> {
+    if (this.opts.cfg.dryRun) {
+      this.log.warn('DRY RUN: ордер НЕ отменён', { symbol, orderId });
+      return { cancelled: false, reason: 'dry-run' };
+    }
+    try {
+      await this.opts.rest.signedDelete('/fapi/v1/order', { symbol, orderId });
+      return { cancelled: true };
+    } catch (e) {
+      if (e instanceof BinanceApiError && e.code !== undefined && ORDER_GONE_CODES.has(e.code)) {
+        this.log.info('ордер уже отсутствует на бирже', { symbol, orderId, code: e.code });
+        return { cancelled: false, reason: 'already-gone' };
       }
       throw e;
     }
