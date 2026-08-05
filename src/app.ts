@@ -22,7 +22,7 @@ import {
   type RawTradeLite,
   type RawUserDataEvent,
 } from './binance/mappers.js';
-import { Engine } from './core/engine.js';
+import { Engine, type EngineHooks } from './core/engine.js';
 import type { Logger } from './util/logger.js';
 import { positionKey } from './types.js';
 import { isZero } from './util/num.js';
@@ -30,6 +30,27 @@ import { isZero } from './util/num.js';
 export interface AppDeps {
   cfg: Config;
   logger: Logger;
+  /** Внешний слой (десктоп-обёртка) подписывается на срабатывания и действия. */
+  hooks?: EngineHooks;
+  /** Вызывается при каждом изменении состояния потока — для индикатора в трее. */
+  onStreamState?: (state: { connected: boolean; reason: string }) => void;
+}
+
+/** Снимок состояния для UI. */
+export interface AppSnapshot {
+  running: boolean;
+  hedgeMode: boolean;
+  engine: ReturnType<Engine['stats']> | null;
+  ws: { messages: number; pings: number; connectedAtMs: number; lastMessageAtMs: number } | null;
+  positions: Array<{
+    symbol: string;
+    positionSide: string;
+    qty: number;
+    entryPrice: number;
+    openedAtMs: number | null;
+    openTimeKnown: boolean;
+  }>;
+  eventCounts: Record<string, number>;
 }
 
 export class App {
@@ -138,6 +159,7 @@ export class App {
       cfg,
       executor,
       logger: logger.child({ mod: 'engine' }),
+      ...(this.deps.hooks ? { hooks: this.deps.hooks } : {}),
     });
 
     await this.bootstrapState(snapshot.positions, snapshot.openOrders, true);
@@ -152,8 +174,10 @@ export class App {
       ...(wsAgent ? { wsAgent } : {}),
       onEvent: (evt) => this.handleEvent(evt),
       onConnected: (attempt) => {
+        this.deps.onStreamState?.({ connected: true, reason: 'подключено' });
         if (attempt > 0 || this.engine) void this.reconcile('после подключения');
       },
+      onError: (err) => this.deps.onStreamState?.({ connected: false, reason: err.message }),
     });
     await this.stream.start();
 
@@ -328,6 +352,27 @@ export class App {
       default:
         logger.debug('необработанное событие', { type: String(evt.e) });
     }
+  }
+
+  /** Полный снимок состояния для внешнего UI. */
+  snapshot(): AppSnapshot {
+    return {
+      running: this.engine !== null,
+      hedgeMode: this.hedgeMode,
+      engine: this.engine ? this.engine.stats() : null,
+      ws: this.stream ? this.stream.stats() : null,
+      positions: this.engine
+        ? this.engine.positions.open().map((p) => ({
+            symbol: p.symbol,
+            positionSide: p.positionSide,
+            qty: p.qty,
+            entryPrice: p.entryPrice,
+            openedAtMs: p.openedAtMs,
+            openTimeKnown: p.openTimeKnown,
+          }))
+        : [],
+      eventCounts: Object.fromEntries(this.eventCounts),
+    };
   }
 
   async stop(): Promise<void> {

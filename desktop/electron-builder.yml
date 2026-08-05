@@ -1,0 +1,36 @@
+appId: com.beakid.antiavg
+productName: AntiAvg
+directories:
+  output: release
+files:
+  - build/**/*
+  - renderer/**/*
+  - preload.cjs
+  - package.json
+  - from: ../dist
+    to: core
+  - from: ../node_modules
+    to: node_modules
+    filter:
+      - ws/**/*
+      - undici/**/*
+      - zod/**/*
+      - https-proxy-agent/**/*
+      - socks-proxy-agent/**/*
+      - agent-base/**/*
+      - socks/**/*
+      - ip-address/**/*
+      - smart-buffer/**/*
+      - debug/**/*
+      - ms/**/*
+win:
+  target: nsis
+  artifactName: AntiAvg-${version}-setup.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: AntiAvg
+mac:
+  target: dmg
+  category: public.app-category.finance

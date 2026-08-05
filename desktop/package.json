@@ -1,0 +1,22 @@
+{
+  "name": "antiavg-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Окно и трей для AntiAvg",
+  "main": "build/main.js",
+  "type": "module",
+  "scripts": {
+    "build:core": "npm --prefix .. run build",
+    "build:main": "tsc -p tsconfig.json",
+    "build": "npm run build:core && npm run build:main",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron . --dev",
+    "dist": "npm run build && electron-builder --win --mac",
+    "dist:win": "npm run build && electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.3"
+  }
+}
