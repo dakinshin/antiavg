@@ -13,7 +13,7 @@
     "dev": "npm run build && electron . --dev",
     "dist": "npm run build && electron-builder --win --mac",
     "dist:win": "npm run build && electron-builder --win",
-    "fix:wincodesign": "powershell -ExecutionPolicy Bypass -File scripts/fix-wincodesign.ps1",
+    "fix:wincodesign": "node scripts/fix-wincodesign.mjs",
     "dist:win:noedit": "npm run build && electron-builder --win -c.win.signAndEditExecutable=false"
   },
   "devDependencies": {
