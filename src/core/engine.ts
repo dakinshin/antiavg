@@ -8,6 +8,7 @@ import { isZero, round8, sameSign } from '../util/num.js';
 import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
 import {
+  isTerminalStatus,
   positionKey,
   type DetectionResult,
   type FillEvent,
@@ -34,8 +35,15 @@ export interface ExecutionOutcome {
 export interface ProtectiveExecutor {
   /** Отправляет защитный рыночный ордер. */
   execute(action: ProtectiveAction): Promise<ExecutionOutcome>;
-  /** Снимает конкретный ордер (профилактика). */
-  cancelOrder?(symbol: string, orderId: number): Promise<{ cancelled: boolean; reason?: string }>;
+  /**
+   * Снимает конкретный ордер (профилактика). Условные ордера снимаются другим
+   * эндпоинтом, поэтому признак `algo` обязателен к передаче.
+   */
+  cancelOrder?(
+    symbol: string,
+    orderId: number,
+    opts?: { algo?: boolean },
+  ): Promise<{ cancelled: boolean; reason?: string }>;
   /** Отменяет все открытые ордера по символу (опционально). */
   cancelOpenOrders?(symbol: string): Promise<void>;
 }
@@ -142,8 +150,7 @@ export class Engine {
   /** Регистрация ордера (событие NEW и любые последующие). */
   onOrderEvent(evt: OrderLifecycleEvent): void {
     this.orders.upsert(evt.order);
-    const terminal = ['CANCELED', 'FILLED', 'EXPIRED', 'REJECTED', 'EXPIRED_IN_MATCH'];
-    if (terminal.includes(evt.orderStatus)) {
+    if (isTerminalStatus(evt.orderStatus)) {
       this.orders.markClosed(evt.order.orderId, this.now());
       this.cancelRequested.delete(evt.order.orderId);
     } else {
@@ -194,7 +201,7 @@ export class Engine {
       });
 
       try {
-        const res = await this.executor.cancelOrder(symbol, order.orderId);
+        const res = await this.executor.cancelOrder(symbol, order.orderId, { algo: order.algo });
         if (res.cancelled) this.cancelledOrders++;
         this.hooks.onOrderCancelled?.(verdict, res.cancelled);
         if (!res.cancelled && res.reason !== 'dry-run') {

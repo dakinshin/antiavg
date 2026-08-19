@@ -12,12 +12,14 @@ import {
   parseProxy,
 } from './binance/proxy.js';
 import {
+  algoUpdateToLifecycleEvent,
   isFillEvent,
   toFillEvent,
   toOrderLifecycleEvent,
   toPositionSnapshots,
   tradeLiteToFillEvent,
   type RawAccountUpdate,
+  type RawAlgoUpdate,
   type RawOrderTradeUpdate,
   type RawTradeLite,
   type RawUserDataEvent,
@@ -408,9 +410,20 @@ export class App {
         else logger.debug('TRADE_LITE без известного ордера в hedge mode — жду ORDER_TRADE_UPDATE', { symbol: raw.s });
         return;
       }
+      case 'ALGO_UPDATE': {
+        // Условные ордера — стопы, тейки, трейлинг — с конца 2025 года живут
+        // отдельно и приходят ЭТИМ событием, а не ORDER_TRADE_UPDATE. Сервис,
+        // который его игнорирует, не видит стопов вообще: ни чтобы оценить
+        // риск, ни чтобы вернуть снятый.
+        const raw = evt as unknown as RawAlgoUpdate;
+        if (!isSymbolWatched(cfg, raw.o.s)) return;
+        const lifecycle = algoUpdateToLifecycleEvent(raw, cfg.clientOrderIdPrefix);
+        engine.onOrderEvent(lifecycle);
+        this.risk?.onOrderEvent(lifecycle);
+        return;
+      }
       case 'ACCOUNT_CONFIG_UPDATE':
       case 'MARGIN_CALL':
-      case 'ALGO_UPDATE':
       case 'STRATEGY_UPDATE':
       case 'GRID_UPDATE':
       case 'CONDITIONAL_ORDER_TRIGGER_REJECT':

@@ -1,6 +1,6 @@
 {
   "name": "antiavg-desktop",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Окно и трей для AntiAvg — защиты от усреднения в убытке",
   "main": "build/main.js",

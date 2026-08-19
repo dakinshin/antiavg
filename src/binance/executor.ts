@@ -83,6 +83,13 @@ interface RawOrderResponse {
   status?: string;
 }
 
+/** Ответ POST /fapi/v1/algoOrder — у условных ордеров свои идентификаторы. */
+interface RawAlgoOrderResponse {
+  algoId: number;
+  clientAlgoId?: string;
+  algoStatus?: string;
+}
+
 export class BinanceExecutor implements ProtectiveExecutor {
   private readonly log: Logger;
   private readonly now: () => number;
@@ -203,17 +210,20 @@ export class BinanceExecutor implements ProtectiveExecutor {
     }
     const priceStr =
       tick > 0 ? formatByStep(rounded, tick) : rounded.toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
-    const newClientOrderId = this.clientOrderId();
+    const clientAlgoId = this.clientOrderId();
 
+    // Условный ордер идёт в Algo Order API: обычный /fapi/v1/order отвечает
+    // на STOP_MARKET ошибкой -4120. Цена срабатывания здесь называется
+    // triggerPrice, а не stopPrice.
     const params: Record<string, string | number | boolean> = {
+      algoType: 'CONDITIONAL',
       symbol: spec.symbol,
       side: spec.side,
       type: 'STOP_MARKET',
-      stopPrice: priceStr,
+      triggerPrice: priceStr,
       closePosition: 'true',
       workingType: 'MARK_PRICE',
-      newClientOrderId,
-      newOrderRespType: 'RESULT',
+      clientAlgoId,
     };
     if (this.opts.hedgeMode || spec.positionSide !== 'BOTH') {
       params.positionSide =
@@ -222,15 +232,15 @@ export class BinanceExecutor implements ProtectiveExecutor {
 
     if (this.opts.cfg.dryRun) {
       this.log.warn('DRY RUN: стоп НЕ выставлен', { ...params, повод: spec.reason });
-      return { placed: false, reason: 'dry-run', stopPrice: rounded, clientOrderId: newClientOrderId };
+      return { placed: false, reason: 'dry-run', stopPrice: rounded, clientOrderId: clientAlgoId };
     }
 
     try {
-      const res = await this.opts.rest.signedPost<RawOrderResponse>('/fapi/v1/order', params);
+      const res = await this.opts.rest.signedPost<RawAlgoOrderResponse>('/fapi/v1/algoOrder', params);
       return {
         placed: true,
-        orderId: res.orderId,
-        clientOrderId: res.clientOrderId ?? newClientOrderId,
+        orderId: res.algoId,
+        clientOrderId: res.clientAlgoId ?? clientAlgoId,
         stopPrice: rounded,
       };
     } catch (e) {
@@ -239,7 +249,7 @@ export class BinanceExecutor implements ProtectiveExecutor {
         // сигнал вызывающему, что ограничивать риск придётся закрытием позиции.
         this.log.warn('стоп сработал бы сразу — биржа отклонила ордер', {
           symbol: spec.symbol,
-          stopPrice: priceStr,
+          triggerPrice: priceStr,
           code: e.code,
         });
         return { placed: false, reason: 'would-trigger', stopPrice: rounded };
@@ -255,14 +265,25 @@ export class BinanceExecutor implements ProtectiveExecutor {
     }
   }
 
-  /** Снимает конкретный ордер. Уже исчезнувший ордер ошибкой не считается. */
-  async cancelOrder(symbol: string, orderId: number): Promise<{ cancelled: boolean; reason?: string }> {
+  /**
+   * Снимает конкретный ордер. Уже исчезнувший ордер ошибкой не считается.
+   *
+   * Условные ордера (стопы, тейки, трейлинг) живут в отдельном пространстве и
+   * снимаются другим эндпоинтом по своему `algoId` — обычный `/fapi/v1/order`
+   * про них попросту не знает.
+   */
+  async cancelOrder(
+    symbol: string,
+    orderId: number,
+    opts: { algo?: boolean } = {},
+  ): Promise<{ cancelled: boolean; reason?: string }> {
     if (this.opts.cfg.dryRun) {
-      this.log.warn('DRY RUN: ордер НЕ отменён', { symbol, orderId });
+      this.log.warn('DRY RUN: ордер НЕ отменён', { symbol, orderId, algo: Boolean(opts.algo) });
       return { cancelled: false, reason: 'dry-run' };
     }
     try {
-      await this.opts.rest.signedDelete('/fapi/v1/order', { symbol, orderId });
+      if (opts.algo) await this.opts.rest.signedDelete('/fapi/v1/algoOrder', { algoId: orderId });
+      else await this.opts.rest.signedDelete('/fapi/v1/order', { symbol, orderId });
       return { cancelled: true };
     } catch (e) {
       if (e instanceof BinanceApiError && e.code !== undefined && ORDER_GONE_CODES.has(e.code)) {

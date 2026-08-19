@@ -109,6 +109,7 @@ export function toOrderRecord(raw: RawOrderTradeUpdate, ownPrefix: string): Orde
     reduceOnly: Boolean(o.R),
     closePosition: Boolean(o.cp),
     own: Boolean(ownPrefix) && (o.c ?? '').startsWith(ownPrefix),
+    algo: false,
   };
 }
 
@@ -244,6 +245,119 @@ export function openOrderToRecord(raw: RawOpenOrder, ownPrefix: string): OrderRe
     reduceOnly: Boolean(raw.reduceOnly),
     closePosition: Boolean(raw.closePosition),
     own: Boolean(ownPrefix) && (raw.clientOrderId ?? '').startsWith(ownPrefix),
+    algo: false,
+  };
+}
+
+/**
+ * Сырое событие ALGO_UPDATE — жизненный цикл условного ордера.
+ *
+ * Отдельный поток появился, когда Binance вынес стопы, тейки и трейлинг в
+ * Algo Order API. Раньше они приходили обычным ORDER_TRADE_UPDATE, и сервис,
+ * который слушает только его, перестаёт видеть стопы вообще.
+ */
+export interface RawAlgoUpdate {
+  e: 'ALGO_UPDATE';
+  E: number;
+  T: number;
+  o: {
+    /** clientAlgoId */
+    caid?: string;
+    /** algoId — идентификатор в пространстве условных ордеров */
+    aid: number;
+    /** algoType, например CONDITIONAL */
+    at?: string;
+    /** тип ордера: STOP_MARKET, TAKE_PROFIT_MARKET, TRAILING_STOP_MARKET… */
+    o: OrderType;
+    s: string;
+    S: OrderSide;
+    ps?: PositionSide;
+    q?: string;
+    /** NEW | TRIGGERING | TRIGGERED | CANCELED | EXPIRED */
+    X: string;
+    /** id обычного ордера, созданного при срабатывании */
+    ai?: string;
+    /** triggerPrice — то, что в обычных ордерах зовётся stopPrice */
+    tp?: string;
+    p?: string;
+    wt?: string;
+    cp?: boolean;
+    R?: boolean;
+    [k: string]: unknown;
+  };
+}
+
+export function algoUpdateToRecord(raw: RawAlgoUpdate, ownPrefix: string): OrderRecord {
+  const o = raw.o;
+  return {
+    orderId: o.aid,
+    clientOrderId: o.caid ?? '',
+    symbol: o.s,
+    side: o.S,
+    positionSide: o.ps ?? 'BOTH',
+    type: o.o,
+    origType: o.o,
+    placedAtMs: raw.T ?? raw.E,
+    origQty: toNum(o.q),
+    executedQty: 0,
+    price: toNum(o.p),
+    // triggerPrice приходит в поле tp; в остальном сервисе это stopPrice.
+    stopPrice: toNum(o.tp),
+    reduceOnly: Boolean(o.R),
+    closePosition: Boolean(o.cp),
+    own: Boolean(ownPrefix) && (o.caid ?? '').startsWith(ownPrefix),
+    algo: true,
+  };
+}
+
+export function algoUpdateToLifecycleEvent(raw: RawAlgoUpdate, ownPrefix: string): OrderLifecycleEvent {
+  return {
+    eventTimeMs: raw.E,
+    transactionTimeMs: raw.T,
+    executionType: raw.o.X,
+    orderStatus: raw.o.X,
+    order: algoUpdateToRecord(raw, ownPrefix),
+  };
+}
+
+/** Ответ GET /fapi/v1/openAlgoOrders. */
+export interface RawOpenAlgoOrder {
+  algoId: number;
+  clientAlgoId?: string;
+  algoType?: string;
+  orderType: OrderType;
+  symbol: string;
+  side: OrderSide;
+  positionSide?: PositionSide;
+  quantity?: string;
+  algoStatus?: string;
+  triggerPrice?: string;
+  price?: string;
+  workingType?: string;
+  closePosition?: boolean;
+  reduceOnly?: boolean;
+  createTime: number;
+  updateTime?: number;
+}
+
+export function openAlgoOrderToRecord(raw: RawOpenAlgoOrder, ownPrefix: string): OrderRecord {
+  return {
+    orderId: raw.algoId,
+    clientOrderId: raw.clientAlgoId ?? '',
+    symbol: raw.symbol,
+    side: raw.side,
+    positionSide: raw.positionSide ?? 'BOTH',
+    type: raw.orderType,
+    origType: raw.orderType,
+    placedAtMs: raw.createTime,
+    origQty: toNum(raw.quantity),
+    executedQty: 0,
+    price: toNum(raw.price),
+    stopPrice: toNum(raw.triggerPrice),
+    reduceOnly: Boolean(raw.reduceOnly),
+    closePosition: Boolean(raw.closePosition),
+    own: Boolean(ownPrefix) && (raw.clientAlgoId ?? '').startsWith(ownPrefix),
+    algo: true,
   };
 }
 

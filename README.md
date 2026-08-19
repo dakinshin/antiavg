@@ -58,6 +58,33 @@
 Позиция каждого символа учитывается отдельно. Поддерживаются оба режима счёта: one-way
 (`positionSide = BOTH`) и hedge (`LONG` / `SHORT` независимо).
 
+## Условные ордера живут отдельно (Algo Order API)
+
+С конца 2025 года Binance вынес стопы, тейки и трейлинг в отдельное
+пространство. Это ломает любой сервис, написанный по старой модели, причём молча:
+
+| | Обычный ордер | Условный ордер |
+|---|---|---|
+| Разместить | `POST /fapi/v1/order` | `POST /fapi/v1/algoOrder` |
+| Снять | `DELETE /fapi/v1/order` (`orderId`) | `DELETE /fapi/v1/algoOrder` (`algoId`) |
+| Список открытых | `GET /fapi/v1/openOrders` | `GET /fapi/v1/openAlgoOrders` |
+| Событие в потоке | `ORDER_TRADE_UPDATE` | `ALGO_UPDATE` |
+| Цена срабатывания | `stopPrice` (`sp`) | `triggerPrice` (`tp`) |
+| Идентификатор | `orderId`, `clientOrderId` | `algoId`, `clientAlgoId` |
+
+Попытка отправить `STOP_MARKET` на старый эндпоинт отвечает ошибкой **-4120**
+(«Order type not supported for this endpoint. Please use the Algo Order API
+endpoints instead»). А стопы, поставленные человеком, не приходят в
+`ORDER_TRADE_UPDATE` и не появляются в `openOrders` — сервис, который слушает
+только их, считает, что у позиции стопа нет.
+
+Статусы у условных ордеров тоже свои: `NEW` → `TRIGGERING` → `TRIGGERED`, плюс
+`CANCELED`. **`TRIGGERING` — переходное состояние, ордер ещё жив**, а `TRIGGERED`
+означает, что он сработал и вместо него биржа создала обычный ордер со своим id.
+Поэтому правило «возвращать снятый стоп» реагирует только на `CANCELED`.
+
+В коде это `OrderRecord.algo`: признак, по которому выбирается эндпоинт отмены.
+
 ## Управление риском
 
 Четыре независимых правила. **Все по умолчанию выключены** — сервис остаётся тем,

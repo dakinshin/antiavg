@@ -59,6 +59,34 @@ export interface OrderRecord {
   closePosition: boolean;
   /** true, если ордер размещён самим сервисом (защитный) — такие игнорируем. */
   own: boolean;
+  /**
+   * true для условных ордеров (стопы, тейки, трейлинг).
+   *
+   * С конца 2025 года Binance ведёт их в ОТДЕЛЬНОМ пространстве: свои id,
+   * свой эндпоинт размещения и отмены, свои события `ALGO_UPDATE`. Обычный
+   * `POST /fapi/v1/order` отвечает на них ошибкой -4120.
+   */
+  algo: boolean;
+}
+
+/**
+ * Статусы, после которых ордера больше нет.
+ *
+ * `TRIGGERED` — про условные ордера: сработавший алго-ордер завершён, вместо
+ * него биржа создаёт обычный ордер с собственным id. `TRIGGERING` — переходное
+ * состояние, ордер ещё жив.
+ */
+const TERMINAL_STATUSES = new Set([
+  'CANCELED',
+  'FILLED',
+  'EXPIRED',
+  'REJECTED',
+  'EXPIRED_IN_MATCH',
+  'TRIGGERED',
+]);
+
+export function isTerminalStatus(status: string): boolean {
+  return TERMINAL_STATUSES.has(status);
 }
 
 /** Состояние отслеживаемой позиции. */

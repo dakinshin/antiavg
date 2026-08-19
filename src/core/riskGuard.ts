@@ -31,6 +31,7 @@ import {
   type StopKind,
 } from './riskRules.js';
 import {
+  isTerminalStatus,
   parsePositionKey,
   positionKey,
   type OrderLifecycleEvent,
@@ -64,7 +65,11 @@ export interface StopPlacement {
 /** То, что риск-модулю нужно от биржи. Отдельный интерфейс — ради тестов. */
 export interface RiskExecutor {
   execute(action: import('../types.js').ProtectiveAction): Promise<ExecutionOutcome>;
-  cancelOrder(symbol: string, orderId: number): Promise<{ cancelled: boolean; reason?: string }>;
+  cancelOrder(
+    symbol: string,
+    orderId: number,
+    opts?: { algo?: boolean },
+  ): Promise<{ cancelled: boolean; reason?: string }>;
   placeStop(spec: StopOrderSpec): Promise<StopPlacement>;
 }
 
@@ -322,8 +327,7 @@ export class RiskGuard {
     const pos = this.opts.positions.peek(order.symbol, order.positionSide);
     const qty = pos?.qty ?? 0;
 
-    const terminal = ['CANCELED', 'FILLED', 'EXPIRED', 'REJECTED', 'EXPIRED_IN_MATCH'];
-    if (!terminal.includes(evt.orderStatus)) {
+    if (!isTerminalStatus(evt.orderStatus)) {
       const kind = stopKindOf(order, qty);
       if (kind) {
         this.knownStops.set(order.orderId, {
@@ -743,7 +747,7 @@ export class RiskGuard {
       if (risk.verdict !== 'exceeded') continue;
       this.ourCancels.add(s.orderId);
       try {
-        await this.opts.executor.cancelOrder(symbol, s.orderId);
+        await this.opts.executor.cancelOrder(symbol, s.orderId, { algo: true });
       } catch (e) {
         this.ourCancels.delete(s.orderId);
         this.log.error('не удалось снять слишком дальний стоп', {
@@ -862,6 +866,7 @@ export class RiskGuard {
           reduceOnly: false,
           closePosition: true,
           own: true,
+          algo: true,
         });
         // И запоминаем как защищаемый стоп. Полагаться на эхо-событие от биржи
         // нельзя: если оно потеряется, наш собственный стоп окажется единственным,

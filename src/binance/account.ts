@@ -1,8 +1,10 @@
 import type { BinanceRestClient } from './rest.js';
 import { BinanceApiError } from './rest.js';
 import {
+  openAlgoOrderToRecord,
   openOrderToRecord,
   positionRiskToSnapshot,
+  type RawOpenAlgoOrder,
   type RawOpenOrder,
   type RawPositionRisk,
   type RawUserTrade,
@@ -87,9 +89,39 @@ export class AccountService {
     return price;
   }
 
+  /**
+   * Открытые ордера: обычные И условные.
+   *
+   * Стопы, тейки и трейлинг в `/fapi/v1/openOrders` больше не появляются —
+   * у них своё пространство и свой эндпоинт. Без второго запроса сервис при
+   * старте считает, что у позиции нет стопа, хотя он есть.
+   */
   async fetchOpenOrders(): Promise<OrderRecord[]> {
-    const raw = await this.rest.signedGet<RawOpenOrder[]>('/fapi/v1/openOrders');
-    return raw.map((o) => openOrderToRecord(o, this.clientOrderIdPrefix));
+    const [plain, algo] = await Promise.all([
+      this.rest.signedGet<RawOpenOrder[]>('/fapi/v1/openOrders'),
+      this.fetchOpenAlgoOrders(),
+    ]);
+    return [...plain.map((o) => openOrderToRecord(o, this.clientOrderIdPrefix)), ...algo];
+  }
+
+  /**
+   * Условные ордера. Сбой здесь не должен ронять старт: без них сервис работает
+   * хуже (не видит стопов), но работает — поэтому ошибка логируется, а не летит
+   * дальше.
+   */
+  async fetchOpenAlgoOrders(): Promise<OrderRecord[]> {
+    try {
+      const raw = await this.rest.signedGet<RawOpenAlgoOrder[]>('/fapi/v1/openAlgoOrders', {
+        algoType: 'CONDITIONAL',
+      });
+      return (raw ?? []).map((o) => openAlgoOrderToRecord(o, this.clientOrderIdPrefix));
+    } catch (e) {
+      this.log.error('не удалось получить условные ордера (стопы)', {
+        error: e instanceof Error ? e.message : String(e),
+        следствие: 'до первого события ALGO_UPDATE сервис не будет видеть уже выставленные стопы',
+      });
+      return [];
+    }
   }
 
   async snapshot(): Promise<AccountSnapshot> {
