@@ -10,7 +10,6 @@ import { fileURLToPath } from 'node:url';
 import { Guard, type GuardEvent } from './guard.js';
 import { loadSettings, saveSettings, redact, encryptionAvailable, DEFAULT_SETTINGS, type Settings } from './settings.js';
 import { stateTitle, trayIcon } from './trayIcon.js';
-import { closeLog, logDir } from './logFile.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -303,14 +302,26 @@ ipcMain.handle('settings:save', async (_e, incoming: Partial<Settings>) => {
     args: ['--hidden'],
   });
 
-  // Настройки применяются только при старте ядра, поэтому сохранение при
-  // работающей защите означает перезапуск. Спрашивать об этом незачем: человек
-  // ввёл новые значения и нажал «Сохранить» — намерение выражено. Открытые
-  // позиции при перезапуске остаются под правилами риска.
+  // Настройки применяются только при старте ядра. Молча оставить их
+  // неприменёнными нельзя: человек включил правило и вправе считать, что оно
+  // работает. Поэтому предлагаем перезапуск сразу, а не строчкой в логе.
   let restarted = false;
   if (guard.isRunning() && changedKeys(before, next).length > 0) {
-    restarted = true;
-    await guard.restart(next);
+    const { response } = await dialog.showMessageBox(win ?? undefined!, {
+      type: 'question',
+      buttons: ['Перезапустить сейчас', 'Позже'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'Применить настройки?',
+      message: 'Новые настройки подействуют только после перезапуска защиты.',
+      detail:
+        'Перезапуск занимает пару секунд, и всё это время защита не работает. ' +
+        'Если отложить, сервис продолжит работать со старыми настройками.',
+    });
+    if (response === 0) {
+      restarted = true;
+      await guard.restart(next);
+    }
   }
 
   // values возвращаем всегда: если замок откатил часть полей, окно должно
@@ -319,7 +330,7 @@ ipcMain.handle('settings:save', async (_e, incoming: Partial<Settings>) => {
 });
 
 ipcMain.handle('app:openLogFolder', () => {
-  void shell.openPath(logDir());
+  void shell.openPath(app.getPath('userData'));
 });
 
 /* ---------------- Запуск ---------------- */
@@ -352,8 +363,6 @@ app.on('window-all-closed', () => {
 (app as unknown as NodeJS.EventEmitter).on('session-end', () => {
   allowQuit = true;
 });
-
-app.on('quit', () => closeLog());
 
 app.on('before-quit', (e) => {
   if (allowQuit) return;

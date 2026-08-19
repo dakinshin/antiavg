@@ -524,40 +524,6 @@ describe('границы применимости', () => {
     expect(h.executor.actions).toHaveLength(0);
   });
 
-  it('о позиции вне правил сервис говорит вслух, а не молчит', async () => {
-    const h = harness({ maxRiskEnabled: true, maxRiskPct: 2 });
-    h.engine.seedPositions([
-      { symbol: 'BTCUSDT', positionSide: 'BOTH', qty: 10, entryPrice: 100, atMs: h.clock.now() },
-    ]);
-    h.placeUserStop(90, 'SELL', 10); // риск 100 при пределе 20
-    await h.risk.settle();
-
-    expect(h.executor.stops).toHaveLength(0);
-    const warned = h.logs.filter((l) => l.msg.includes('вне правил риска'));
-    expect(warned).toHaveLength(1); // ровно один раз, а не на каждое событие
-
-    h.placeUserStop(80, 'SELL', 10);
-    await h.risk.settle();
-    expect(h.logs.filter((l) => l.msg.includes('вне правил риска'))).toHaveLength(1);
-  });
-
-  it('сдвиг стопа виден в логе, даже если вердикт не изменился', async () => {
-    const h = harness({ maxRiskEnabled: false, maxPositionEnabled: true, maxPositionLeverage: 1000, maxRiskPct: 2 });
-    h.openPosition(10, 100);
-    const far = h.placeUserStop(90, 'SELL', 10);
-    await h.risk.settle();
-    const first = h.logs.filter((l) => l.msg.includes('оценка риска')).length;
-
-    // Стоп уехал ещё дальше: вердикт тот же «превышено», но цифры другие.
-    h.cancelOrder(far, { stopPrice: 90 });
-    h.placeUserStop(80, 'SELL', 10);
-    await h.risk.settle();
-
-    const after = h.logs.filter((l) => l.msg.includes('оценка риска'));
-    expect(after.length).toBeGreaterThan(first);
-    expect(after.at(-1)?.meta['стоп']).toBe(80);
-  });
-
   it('перезапуск сохраняет позицию под правилами риска', async () => {
     const first = harness({ maxPositionEnabled: true, maxPositionLeverage: 1000 });
     first.openPosition(1, 100);

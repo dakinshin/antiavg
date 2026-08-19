@@ -235,7 +235,7 @@ const FIELDS = {
   sDefStop: 'defaultStopEnabled', sDefStopPct: 'defaultStopPct',
   sProtectStop: 'protectStopOrders', sMaxRisk: 'maxRiskEnabled', sMaxRiskPct: 'maxRiskPct',
   sBelowMin: 'onQtyBelowMin', sWsProxy: 'wsProxy', sRestProxy: 'restProxy',
-  sLaunch: 'launchOnLogin', sAutoGuard: 'autoStartGuard', sVerbose: 'verboseLog',
+  sLaunch: 'launchOnLogin', sAutoGuard: 'autoStartGuard',
 };
 
 async function openSettings() {
@@ -273,13 +273,7 @@ async function saveSettings() {
     }
   }
   $('settings').close();
-  if (res.restarted) {
-    events.unshift({
-      id: Date.now(), atMs: Date.now(), kind: 'info',
-      text: 'настройки сохранены и применены — защита перезапущена',
-    });
-    renderLog();
-  } else if (res.needsRestart) {
+  if (res.needsRestart) {
     events.unshift({
       id: Date.now(), atMs: Date.now(), kind: 'warn',
       text: 'настройки сохранены, но НЕ применены — перезапустите защиту',

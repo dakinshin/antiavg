@@ -215,7 +215,6 @@ export class App {
     // Строго ПОСЛЕ bootstrapState: там восстанавливается время открытия позиций,
     // по которому и сверяется, та ли это позиция, что была до перезапуска.
     if (this.deps.ownPositions?.length) this.risk.seedOwnPositions(this.deps.ownPositions);
-    this.risk.logCoverage();
 
     const wsAgent = createWsProxyAgent(parseProxy(proxyFor(cfg, 'ws')));
     this.stream = new UserDataStream({

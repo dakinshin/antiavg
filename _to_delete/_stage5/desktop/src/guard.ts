@@ -7,7 +7,6 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import type { Settings } from './settings.js';
-import { writeLog } from './logFile.js';
 import type { GuardState } from './trayIcon.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -19,13 +18,6 @@ interface CoreApp {
   stop(): Promise<void>;
   snapshot(): CoreSnapshot;
   drawdownStatus(): Promise<DrawdownStatus>;
-  ownPositions(): OwnPositionRef[];
-}
-
-/** Позиция под правилами риска — переносится через перезапуск. */
-export interface OwnPositionRef {
-  key: string;
-  openedAtMs: number;
 }
 
 export interface DrawdownStatus {
@@ -135,8 +127,6 @@ export class Guard {
   private alarmUntilMs = 0;
   private dryRun = true;
   private autoRetryCancelled = false;
-  /** Позиции под правилами риска, перенесённые из предыдущего запуска. */
-  private carriedOwnPositions: OwnPositionRef[] = [];
 
   constructor(
     private readonly onChange: () => void,
@@ -202,13 +192,12 @@ export class Guard {
       protectStopOrders: s.protectStopOrders,
       maxRiskEnabled: s.maxRiskEnabled,
       maxRiskPct: s.maxRiskPct,
-      logRawEvents: s.verboseLog,
       symbols: s.symbols,
       maxActionsPerHour: s.maxActionsPerHour,
       onQtyBelowMin: s.onQtyBelowMin,
       wsProxyUrl: s.wsProxy || undefined,
       restProxyUrl: s.restProxy || undefined,
-      logLevel: s.verboseLog ? 'debug' : 'info',
+      logLevel: 'info',
     });
   }
 
@@ -228,32 +217,24 @@ export class Guard {
       const core = this.core;
       const cfg = this.buildConfig(core, settings);
 
-      // Логи ядра идут в файл целиком и в ленту окна — выборочно.
+      // Логи ядра попадают в ленту событий окна: sink вместо вывода в консоль.
       const logger = core.createLogger({
-        level: settings.verboseLog ? 'debug' : 'info',
+        level: 'info',
         json: false,
         sink: (line: string) => {
-          // В файл — всё. Именно он отвечает на вопрос «почему не сработало»:
-          // в упакованном приложении stdout не ведёт никуда.
-          writeLog(line);
-
-          // В ленту — всё, кроме построчного разбора исполнений и отладки:
-          // они идут потоком и вытеснили бы из окна всё остальное.
-          if (line.includes('исполнение:') || /\sDEBUG\s/.test(line)) return;
-          const level: EventKind = /\sERROR\s/.test(line)
-            ? 'error'
-            : /\sWARN\s/.test(line)
-              ? 'warn'
-              : 'info';
-          const msg = line.replace(/^\S+\s+\w+\s+/, '').split(' {')[0] ?? line;
-          this.push(level, msg);
+          process.stdout.write(line + '\n');
+          const level = /\sWARN\s/.test(line) ? 'warn' : /\sERROR\s/.test(line) ? 'error' : null;
+          // В ленту тянем только заметное: остальное уже приходит через хуки.
+          if (level && !line.includes('исполнение:')) {
+            const msg = line.replace(/^\S+\s+\w+\s+/, '').split(' {')[0] ?? line;
+            this.push(level, msg);
+          }
         },
       });
 
       const app = new core.App({
         cfg,
         logger,
-        ownPositions: this.carriedOwnPositions,
         hooks: {
           onDetection: (d: any) => {
             this.alarmUntilMs = Date.now() + 60_000;
@@ -321,7 +302,6 @@ export class Guard {
       });
 
       await app.start();
-      this.carriedOwnPositions = [];
       this.app = app;
       this.startedAtMs = Date.now();
       this.starting = false;
@@ -402,33 +382,18 @@ export class Guard {
    * Перезапуск с новыми настройками.
    *
    * Конфигурация ядра собирается один раз при старте, поэтому изменённая
-   * галочка не действует, пока сервис не поднят заново.
-   *
-   * Открытые позиции переносятся вместе с признаком «под правилами риска».
-   * Без этого перезапуск ради новой настройки выводил бы текущую позицию
-   * из-под правил — то есть делал ровно обратное тому, зачем его затевали.
+   * галочка не действует, пока сервис не поднят заново. Раньше об этом сообщала
+   * строчка в ленте событий — и её было слишком легко не заметить: человек
+   * включал правило, видел «сохранено» и считал, что оно работает.
    */
   async restart(settings: Settings): Promise<{ ok: boolean; error?: string }> {
     const app = this.app;
-    try {
-      this.carriedOwnPositions = app && typeof app.ownPositions === 'function' ? app.ownPositions() : [];
-    } catch {
-      this.carriedOwnPositions = [];
-    }
     this.app = null;
     this.startedAtMs = null;
     if (app) await app.stop().catch(() => undefined);
     this.push('info', 'перезапуск с новыми настройками');
     this.onChange();
-
-    const res = await this.start(settings);
-    if (!res.ok) {
-      // Молчать нельзя: человек сохранил настройки и вправе думать, что защита
-      // работает, а она сейчас выключена.
-      this.push('error', `защита НЕ поднялась после смены настроек: ${res.error ?? 'причина неизвестна'}`);
-      this.onChange();
-    }
-    return res;
+    return this.start(settings);
   }
 
   async stop(): Promise<void> {

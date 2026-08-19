@@ -165,10 +165,6 @@ export class RiskGuard {
   private readonly riskState = new Map<PositionKey, RiskVerdict>();
   /** Позиции, по которым прямо сейчас идёт проверка. */
   private readonly busy = new Set<PositionKey>();
-  /** Позиции, о непопадании которых под правила уже сообщили. */
-  private readonly notOwnReported = new Set<PositionKey>();
-  /** Отпечаток последней оценки риска — чтобы заметить сдвиг стопа. */
-  private readonly riskFingerprint = new Map<PositionKey, string>();
   /** Начатые, но не завершённые проверки — чтобы их можно было дождаться. */
   private readonly pendingWork = new Set<Promise<unknown>>();
 
@@ -281,32 +277,6 @@ export class RiskGuard {
     }
   }
 
-  /**
-   * Сводка после старта: какие открытые позиции попадают под правила, а какие
-   * нет. Печатается один раз и снимает самый частый вопрос — «почему сервис
-   * ничего не делает с моей позицией».
-   */
-  logCoverage(): void {
-    if (!this.active) return;
-    const open = this.opts.positions.open();
-    if (open.length === 0) return;
-
-    const under: string[] = [];
-    const outside: string[] = [];
-    for (const p of open) {
-      const key = positionKey(p.symbol, p.positionSide);
-      (this.ownPositions.has(key) ? under : outside).push(key);
-    }
-    this.log.warn('охват правил риска', {
-      подПравилами: under.length ? under : 'нет',
-      внеПравил: outside.length ? outside : 'нет',
-      пояснение:
-        outside.length > 0
-          ? 'позиции вне правил открыты не при этом запуске — сервис их не трогает'
-          : undefined,
-    });
-  }
-
   /* ---------------- Входные точки ---------------- */
 
   /** Вызывается после того, как исполнение уже применено к модели позиции. */
@@ -373,10 +343,7 @@ export class RiskGuard {
       this.forget(key);
       return;
     }
-    if (!this.isOwnPosition(pos, key)) {
-      this.reportNotOwn(key, symbol, positionSide);
-      return;
-    }
+    if (!this.isOwnPosition(pos, key)) return;
     if (this.busy.has(key)) return;
 
     this.busy.add(key);
@@ -413,30 +380,10 @@ export class RiskGuard {
     return true;
   }
 
-  /**
-   * Позиция под правила не подпадает — сказать об этом ровно один раз.
-   *
-   * Молчаливый пропуск здесь — худший из возможных: человек включил правило,
-   * двигает стоп куда попало и не понимает, почему сервис не реагирует.
-   * Ни одной строчки в логе при этом не появлялось.
-   */
-  private reportNotOwn(key: PositionKey, symbol: string, positionSide: PositionSide): void {
-    if (this.notOwnReported.has(key)) return;
-    this.notOwnReported.add(key);
-    this.log.warn('позиция вне правил риска: она открыта не при этом запуске сервиса', {
-      symbol,
-      positionSide,
-      следствие: 'лимит объёма, дефолтный стоп, защита стопа и лимит риска к ней НЕ применяются',
-      что_делать: 'правила начнут действовать со следующей позиции по этому символу',
-    });
-  }
-
   private forget(key: PositionKey): void {
     this.ownPositions.delete(key);
     this.riskState.delete(key);
     this.defaultStopArmed.delete(key);
-    this.notOwnReported.delete(key);
-    this.riskFingerprint.delete(key);
     const timer = this.stopTimers.get(key);
     if (timer) {
       clearTimeout(timer);
@@ -767,24 +714,6 @@ export class RiskGuard {
     // Пока мы сами ждём момента выставить дефолтный стоп, кричать «риск ничем
     // не ограничен» нечестно: через пару секунд он будет ограничен нами.
     if (a.verdict === 'no-stop' && this.defaultStopPending(key)) return;
-
-    // Вердикт мог не измениться, а стоп — уехать. Уведомление в трее для этого
-    // не нужно, но в логе такое обязано быть видно: иначе «передвинул стоп, и
-    // ничего не произошло» невозможно отличить от «сервис не работает».
-    const fingerprint = `${a.verdict}:${round8(a.stopPrice ?? 0)}:${round8(a.risk ?? 0)}`;
-    if (this.riskFingerprint.get(key) !== fingerprint) {
-      this.riskFingerprint.set(key, fingerprint);
-      this.log.info('оценка риска по позиции', {
-        symbol,
-        positionSide,
-        вердикт: a.verdict,
-        риск: a.risk !== undefined ? round8(a.risk) : 'неизвестен',
-        предел: round8(a.maxRisk),
-        стоп: a.stopPrice !== undefined ? round8(a.stopPrice) : 'нет',
-        жёсткийЛимит: this.cfg.maxRiskEnabled ? 'вкл' : 'выкл, только уведомления',
-      });
-    }
-
     if (this.riskState.get(key) === a.verdict) return;
     this.riskState.set(key, a.verdict);
 

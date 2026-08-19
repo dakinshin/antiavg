@@ -7,7 +7,6 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import type { Settings } from './settings.js';
-import { writeLog } from './logFile.js';
 import type { GuardState } from './trayIcon.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -202,13 +201,12 @@ export class Guard {
       protectStopOrders: s.protectStopOrders,
       maxRiskEnabled: s.maxRiskEnabled,
       maxRiskPct: s.maxRiskPct,
-      logRawEvents: s.verboseLog,
       symbols: s.symbols,
       maxActionsPerHour: s.maxActionsPerHour,
       onQtyBelowMin: s.onQtyBelowMin,
       wsProxyUrl: s.wsProxy || undefined,
       restProxyUrl: s.restProxy || undefined,
-      logLevel: s.verboseLog ? 'debug' : 'info',
+      logLevel: 'info',
     });
   }
 
@@ -228,25 +226,18 @@ export class Guard {
       const core = this.core;
       const cfg = this.buildConfig(core, settings);
 
-      // Логи ядра идут в файл целиком и в ленту окна — выборочно.
+      // Логи ядра попадают в ленту событий окна: sink вместо вывода в консоль.
       const logger = core.createLogger({
-        level: settings.verboseLog ? 'debug' : 'info',
+        level: 'info',
         json: false,
         sink: (line: string) => {
-          // В файл — всё. Именно он отвечает на вопрос «почему не сработало»:
-          // в упакованном приложении stdout не ведёт никуда.
-          writeLog(line);
-
-          // В ленту — всё, кроме построчного разбора исполнений и отладки:
-          // они идут потоком и вытеснили бы из окна всё остальное.
-          if (line.includes('исполнение:') || /\sDEBUG\s/.test(line)) return;
-          const level: EventKind = /\sERROR\s/.test(line)
-            ? 'error'
-            : /\sWARN\s/.test(line)
-              ? 'warn'
-              : 'info';
-          const msg = line.replace(/^\S+\s+\w+\s+/, '').split(' {')[0] ?? line;
-          this.push(level, msg);
+          process.stdout.write(line + '\n');
+          const level = /\sWARN\s/.test(line) ? 'warn' : /\sERROR\s/.test(line) ? 'error' : null;
+          // В ленту тянем только заметное: остальное уже приходит через хуки.
+          if (level && !line.includes('исполнение:')) {
+            const msg = line.replace(/^\S+\s+\w+\s+/, '').split(' {')[0] ?? line;
+            this.push(level, msg);
+          }
         },
       });
 

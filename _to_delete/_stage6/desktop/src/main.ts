@@ -10,7 +10,6 @@ import { fileURLToPath } from 'node:url';
 import { Guard, type GuardEvent } from './guard.js';
 import { loadSettings, saveSettings, redact, encryptionAvailable, DEFAULT_SETTINGS, type Settings } from './settings.js';
 import { stateTitle, trayIcon } from './trayIcon.js';
-import { closeLog, logDir } from './logFile.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -319,7 +318,7 @@ ipcMain.handle('settings:save', async (_e, incoming: Partial<Settings>) => {
 });
 
 ipcMain.handle('app:openLogFolder', () => {
-  void shell.openPath(logDir());
+  void shell.openPath(app.getPath('userData'));
 });
 
 /* ---------------- Запуск ---------------- */
@@ -352,8 +351,6 @@ app.on('window-all-closed', () => {
 (app as unknown as NodeJS.EventEmitter).on('session-end', () => {
   allowQuit = true;
 });
-
-app.on('quit', () => closeLog());
 
 app.on('before-quit', (e) => {
   if (allowQuit) return;

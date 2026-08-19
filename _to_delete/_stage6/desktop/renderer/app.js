@@ -235,7 +235,7 @@ const FIELDS = {
   sDefStop: 'defaultStopEnabled', sDefStopPct: 'defaultStopPct',
   sProtectStop: 'protectStopOrders', sMaxRisk: 'maxRiskEnabled', sMaxRiskPct: 'maxRiskPct',
   sBelowMin: 'onQtyBelowMin', sWsProxy: 'wsProxy', sRestProxy: 'restProxy',
-  sLaunch: 'launchOnLogin', sAutoGuard: 'autoStartGuard', sVerbose: 'verboseLog',
+  sLaunch: 'launchOnLogin', sAutoGuard: 'autoStartGuard',
 };
 
 async function openSettings() {
