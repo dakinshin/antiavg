@@ -25,6 +25,14 @@ const ORDER_GONE_CODES = new Set([-2011, -2013]);
  */
 const WOULD_TRIGGER_CODES = new Set([-2021]);
 
+/**
+ * -4130: «An open stop or take profit order with GTE and closePosition in the
+ * direction is existing». Позиция уже под защитой такого же стопа — обычно
+ * человек поставил свой на доли секунды раньше, чем до нас дошло событие о нём.
+ * Исход желаемый, а не сбойный.
+ */
+const ALREADY_PROTECTED_CODES = new Set([-4130]);
+
 export interface QtyResolution {
   ok: boolean;
   qty: number;
@@ -244,6 +252,14 @@ export class BinanceExecutor implements ProtectiveExecutor {
         stopPrice: rounded,
       };
     } catch (e) {
+      if (e instanceof BinanceApiError && e.code !== undefined && ALREADY_PROTECTED_CODES.has(e.code)) {
+        this.log.info('стоп уже стоит — свой не нужен', {
+          symbol: spec.symbol,
+          triggerPrice: priceStr,
+          code: e.code,
+        });
+        return { placed: false, reason: 'already-protected', stopPrice: rounded };
+      }
       if (e instanceof BinanceApiError && e.code !== undefined && WOULD_TRIGGER_CODES.has(e.code)) {
         // Цена уже за стопом: биржа такой ордер не принимает. Это не сбой, а
         // сигнал вызывающему, что ограничивать риск придётся закрытием позиции.

@@ -293,6 +293,91 @@ describe('дефолтный стоп', () => {
     expect(h.logs.some((l) => l.msg.includes('стопа нет — ставлю дефолтный'))).toBe(true);
   });
 
+  it('следующая позиция по тому же символу тоже получает стоп', async () => {
+    // Воспроизведение боевой аномалии 2026-08-19: проверка, начатая для позиции,
+    // которую успели закрыть, ставила отметку «уже назначено» ПОСЛЕ сброса при
+    // закрытии — и следующая позиция по этому символу оставалась без стопа.
+    const h = harness({ defaultStopEnabled: true, defaultStopPct: 1, defaultStopDelayMs: 2000 });
+
+    h.openPosition(1, 100);
+    await h.risk.settle();
+    // Позиция закрывается ДО того, как отработал таймер.
+    const closeId = nextOrderId();
+    feed(h.engine, newOrderEvent({ orderId: closeId, side: 'SELL', qty: 1, type: 'MARKET', reduceOnly: true, timeMs: h.clock.now() }));
+    feed(h.engine, fillEvent({ orderId: closeId, side: 'SELL', lastQty: 1, lastPrice: 101, type: 'MARKET', reduceOnly: true, timeMs: h.clock.now() }));
+    h.risk.onFill('BTCUSDT', 'BOTH');
+    await vi.advanceTimersByTimeAsync(2000);
+    await h.risk.settle();
+    expect(h.executor.stops).toHaveLength(0);
+
+    // Новая позиция по тому же символу.
+    h.clock.advance(1000);
+    h.market.price = 110;
+    h.openPosition(1, 110);
+    await h.risk.settle();
+    await vi.advanceTimersByTimeAsync(2000);
+    await h.risk.settle();
+
+    expect(h.executor.stops).toHaveLength(1);
+    expect(h.executor.stops[0]?.stopPrice).toBeCloseTo(108.9);
+  });
+
+  it('таймер от прошлой позиции не трогает новую', async () => {
+    const h = harness({ defaultStopEnabled: true, defaultStopPct: 1, defaultStopDelayMs: 2000 });
+    h.openPosition(1, 100);
+    await h.risk.settle();
+
+    // Закрыли и тут же открыли заново, пока таймер первой ещё тикает.
+    const closeId = nextOrderId();
+    feed(h.engine, newOrderEvent({ orderId: closeId, side: 'SELL', qty: 1, type: 'MARKET', reduceOnly: true, timeMs: h.clock.now() }));
+    feed(h.engine, fillEvent({ orderId: closeId, side: 'SELL', lastQty: 1, lastPrice: 101, type: 'MARKET', reduceOnly: true, timeMs: h.clock.now() }));
+    h.risk.onFill('BTCUSDT', 'BOTH');
+    h.clock.advance(500);
+    h.market.price = 200;
+    h.openPosition(2, 200);
+    await h.risk.settle();
+    await vi.advanceTimersByTimeAsync(5000);
+    await h.risk.settle();
+
+    // Стоп ровно один и по средней НОВОЙ позиции, а не старой.
+    expect(h.executor.stops).toHaveLength(1);
+    expect(h.executor.stops[0]?.stopPrice).toBeCloseTo(198);
+  });
+
+  it('уже существующий чужой стоп — не ошибка', async () => {
+    const h = harness({ defaultStopEnabled: true, defaultStopDelayMs: 0 });
+    h.executor.stopResult = { placed: false, reason: 'already-protected' };
+    h.openPosition(1, 100);
+    await vi.advanceTimersByTimeAsync(1);
+    await h.risk.settle();
+
+    expect(h.logs.filter((l) => l.level === 'error')).toHaveLength(0);
+    expect(h.logs.some((l) => l.msg.includes('стоп уже стоял'))).toBe(true);
+  });
+
+  it('без дефолтного стопа жёсткий лимит риска сам защищает позицию', async () => {
+    // Депозит 1000, предел 2% = 20 USDT, позиция 10 по 100 -> стоп на 98.
+    const h = harness({ defaultStopEnabled: false, maxRiskEnabled: true, maxRiskPct: 2, defaultStopDelayMs: 0 });
+    h.openPosition(10, 100);
+    await vi.advanceTimersByTimeAsync(1);
+    await h.risk.settle();
+
+    expect(h.executor.stops).toHaveLength(1);
+    expect(h.executor.stops[0]?.stopPrice).toBeCloseTo(98);
+    expect(h.executor.stops[0]?.reason).toContain('лимит риска');
+  });
+
+  it('без стопа и с уже пройденной предельной ценой позиция закрывается', async () => {
+    const h = harness({ defaultStopEnabled: false, maxRiskEnabled: true, maxRiskPct: 2, defaultStopDelayMs: 0 });
+    h.openPosition(10, 100);
+    h.market.price = 97; // предельный стоп 98 уже пройден
+    await vi.advanceTimersByTimeAsync(1);
+    await h.risk.settle();
+
+    expect(h.executor.stops).toHaveLength(0);
+    expect(h.executor.actions.some((a) => a.mode === 'close')).toBe(true);
+  });
+
   it('закрытая позиция стопа не получает', async () => {
     const h = harness({ defaultStopEnabled: true, defaultStopDelayMs: 2000 });
     const openId = h.openPosition(1, 100);

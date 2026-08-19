@@ -59,7 +59,7 @@ export interface StopPlacement {
   orderId?: number;
   clientOrderId?: string;
   stopPrice?: number;
-  reason?: 'dry-run' | 'would-trigger' | 'bad-price';
+  reason?: 'dry-run' | 'would-trigger' | 'bad-price' | 'already-protected';
 }
 
 /** То, что риск-модулю нужно от биржи. Отдельный интерфейс — ради тестов. */
@@ -156,8 +156,15 @@ export class RiskGuard {
   private readonly ownPositions = new Set<PositionKey>();
   /** Отложенные проверки «стоп так и не появился». */
   private readonly stopTimers = new Map<PositionKey, ReturnType<typeof setTimeout>>();
-  /** Позиции, для которых проверка дефолтного стопа уже назначалась. */
-  private readonly defaultStopArmed = new Set<PositionKey>();
+  /**
+   * Для каких позиций проверка стопа уже назначалась.
+   *
+   * Значение — время открытия позиции. Просто «назначали для этого символа»
+   * недостаточно: проверка, начатая для уже закрытой позиции, ставила отметку
+   * ПОСЛЕ того, как её сбросили при закрытии, и следующая позиция по тому же
+   * символу оставалась без стопа навсегда.
+   */
+  private readonly defaultStopArmed = new Map<PositionKey, number>();
   /** Отложенные восстановления снятых стопов. */
   private readonly restoreTimers = new Map<number, ReturnType<typeof setTimeout>>();
   /** Последнее известное состояние стоп-ордеров — чтобы знать, что восстанавливать. */
@@ -386,7 +393,18 @@ export class RiskGuard {
     this.busy.add(key);
     try {
       if (this.cfg.maxPositionEnabled) await this.enforcePositionCap(symbol, positionSide);
-      if (this.cfg.defaultStopEnabled) this.armDefaultStop(symbol, positionSide);
+
+      // Позицию перечитываем: между началом проверки и этой строкой были
+      // сетевые запросы, за время которых её могли закрыть. Решения по мёртвой
+      // позиции не просто бесполезны — они отравляют состояние для следующей.
+      const fresh = this.opts.positions.peek(symbol, positionSide);
+      if (!fresh || isZero(fresh.qty)) {
+        this.forget(key);
+        return;
+      }
+      if (this.cfg.defaultStopEnabled || this.cfg.maxRiskEnabled) {
+        this.armDefaultStop(symbol, positionSide, fresh);
+      }
       await this.checkRisk(symbol, positionSide);
     } catch (e) {
       this.log.error('проверка риска не удалась', {
@@ -512,21 +530,24 @@ export class RiskGuard {
    * отдельная настройка, запрещающая снимать стоп, и подменять её здесь было бы
    * тихим расширением того, на что человек согласился.
    */
-  private armDefaultStop(symbol: string, positionSide: PositionSide): void {
+  private armDefaultStop(symbol: string, positionSide: PositionSide, pos: PositionState): void {
     const key = positionKey(symbol, positionSide);
-    if (this.defaultStopArmed.has(key)) return;
-    this.defaultStopArmed.add(key);
+    // Поколение позиции: та же пара символ+сторона, открытая заново, — это
+    // ДРУГАЯ позиция, и проверку она обязана получить свою.
+    const generation = pos.openedAtMs ?? 0;
+    if (this.defaultStopArmed.get(key) === generation) return;
+    this.defaultStopArmed.set(key, generation);
 
     const delay = Math.max(0, this.cfg.defaultStopDelayMs);
     this.log.info('жду стоп по новой позиции', {
       symbol,
       positionSide,
       ждуМс: delay,
-      отступПроц: this.cfg.defaultStopPct,
+      отступПроц: this.cfg.defaultStopEnabled ? this.cfg.defaultStopPct : 'по лимиту риска',
     });
     const timer = setTimeout(() => {
       this.stopTimers.delete(key);
-      void this.track(this.ensureDefaultStop(symbol, positionSide));
+      void this.track(this.ensureDefaultStop(symbol, positionSide, generation));
     }, delay);
     // НЕ unref: пропущенный стоп — это неограниченный убыток, ради него процесс
     // обязан дожить до проверки.
@@ -538,15 +559,24 @@ export class RiskGuard {
     return this.stopTimers.has(key);
   }
 
-  private async ensureDefaultStop(symbol: string, positionSide: PositionSide): Promise<void> {
+  private async ensureDefaultStop(
+    symbol: string,
+    positionSide: PositionSide,
+    generation?: number,
+  ): Promise<void> {
     if (this.stopped) return;
-    if (!this.cfg.defaultStopEnabled) {
-      this.log.info('дефолтный стоп выключен настройкой, проверка пропущена', { symbol, positionSide });
+    if (!this.cfg.defaultStopEnabled && !this.cfg.maxRiskEnabled) {
+      this.log.info('стоп программой не контролируется, проверка пропущена', { symbol, positionSide });
       return;
     }
     const pos = this.opts.positions.peek(symbol, positionSide);
     if (!pos || isZero(pos.qty)) {
       this.log.info('позиция закрыта раньше проверки, дефолтный стоп не нужен', { symbol, positionSide });
+      return;
+    }
+    // Проверка назначалась ДРУГОЙ позиции по тому же символу — эту она не касается.
+    if (generation !== undefined && (pos.openedAtMs ?? 0) !== generation) {
+      this.log.info('позиция переоткрыта, проверка от прошлой не применяется', { symbol, positionSide });
       return;
     }
 
@@ -568,15 +598,31 @@ export class RiskGuard {
       отступПроц: this.cfg.defaultStopPct,
     });
 
-    let stopPrice = defaultStopPrice(pos.entryPrice, pos.qty, this.cfg.defaultStopPct);
+    // Отступ берётся от того правила, которое включено. Если включены оба —
+    // от более строгого: жёсткий лимит риска на то и жёсткий, чтобы дефолтный
+    // процент не мог его перекрыть.
+    let stopPrice: number | null = this.cfg.defaultStopEnabled
+      ? defaultStopPrice(pos.entryPrice, pos.qty, this.cfg.defaultStopPct)
+      : null;
+    let reason = 'дефолтный стоп';
 
-    // Лимит риска может требовать стоп ближе, чем дефолтный процент.
     if (this.cfg.maxRiskEnabled) {
       const balance = await this.walletBalance();
-      const maxRisk = (balance * this.cfg.maxRiskPct) / 100;
-      const limit = riskLimitStopPrice(pos.qty, pos.entryPrice, maxRisk);
-      stopPrice = pos.qty > 0 ? Math.max(stopPrice, limit) : Math.min(stopPrice, limit);
+      if (balance > 0) {
+        const maxRisk = (balance * this.cfg.maxRiskPct) / 100;
+        const limit = riskLimitStopPrice(pos.qty, pos.entryPrice, maxRisk);
+        if (stopPrice === null) {
+          // Дефолтный стоп выключен, но жёсткий лимит риска включён. Позиция без
+          // стопа нарушает его худшим образом — риск не ограничен ничем, — и
+          // ограничиться предупреждением значило бы не выполнить обещание.
+          stopPrice = limit;
+          reason = 'лимит риска: позиция без стопа';
+        } else {
+          stopPrice = pos.qty > 0 ? Math.max(stopPrice, limit) : Math.min(stopPrice, limit);
+        }
+      }
     }
+    if (stopPrice === null) return;
 
     const price = await this.priceFor(symbol, pos.entryPrice);
     if (stopAlreadyPassed(pos.qty, stopPrice, price)) {
@@ -588,7 +634,7 @@ export class RiskGuard {
       return;
     }
 
-    await this.placeStop(symbol, positionSide, stopPrice, 'дефолтный стоп');
+    await this.placeStop(symbol, positionSide, stopPrice, reason);
     // Вердикт по риску мы придержали, пока ждали стоп, — теперь он определён.
     await this.checkRisk(symbol, positionSide);
   }
@@ -882,6 +928,9 @@ export class RiskGuard {
       }
     } else if (res.reason === 'would-trigger') {
       await this.closeAtMarket(symbol, positionSide, `биржа отклонила стоп: цена уже за уровнем (${reason})`);
+    } else if (res.reason === 'already-protected') {
+      // Не ошибка: позиция защищена, просто не нами.
+      this.log.info('стоп уже стоял, свой не понадобился', { symbol, positionSide, повод: reason });
     } else if (res.reason !== 'dry-run') {
       this.log.error('стоп выставить не удалось', { symbol, positionSide, повод: reason, причина: res.reason });
     }
