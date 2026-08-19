@@ -232,7 +232,7 @@ const FIELDS = {
   sLockDrawdown: 'lockStopWhileInDrawdown', sLockSettings: 'lockSettingsWhileInDrawdown',
   sSymbols: 'symbols', sMaxActions: 'maxActionsPerHour',
   sMaxPos: 'maxPositionEnabled', sMaxPosLev: 'maxPositionLeverage',
-  sDefStop: 'defaultStopEnabled', sDefStopPct: 'defaultStopPct',
+  sDefStop: 'defaultStopEnabled', sDefStopPct: 'defaultStopPct', sWorkingType: 'stopWorkingType',
   sProtectStop: 'protectStopOrders', sMaxRisk: 'maxRiskEnabled', sMaxRiskPct: 'maxRiskPct',
   sBelowMin: 'onQtyBelowMin', sWsProxy: 'wsProxy', sRestProxy: 'restProxy',
   sLaunch: 'launchOnLogin', sAutoGuard: 'autoStartGuard', sVerbose: 'verboseLog',

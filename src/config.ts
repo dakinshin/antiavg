@@ -176,6 +176,21 @@ export const ConfigSchema = z.object({
   defaultStopEnabled: boolFromEnv.default(false),
   /** Отступ дефолтного стопа от средней цены входа, % от цены. */
   defaultStopPct: numFromEnv(1),
+  /**
+   * По какой цене срабатывают стопы, которые ставит сервис.
+   *
+   * `CONTRACT_PRICE` (по умолчанию) — по цене последней сделки. Срабатывает
+   * мгновенно и ровно там, где человек видит уровень в стакане. Так же Binance
+   * ставит стопы, выставленные руками, — значит, свои и наши ведут себя
+   * одинаково, и это важнее теоретических выгод: инструмент, который срабатывает
+   * не там, где ожидаешь, перестают понимать.
+   *
+   * `MARK_PRICE` — по марку: медиана из индекса, индекса со сглаженным базисом
+   * и цены сделки, с данными раз в секунду. По нему биржа считает ликвидацию, и
+   * он не ловится на проколы стакана — но срабатывает с задержкой около секунды
+   * и расходится с тем, что видно глазами.
+   */
+  stopWorkingType: z.enum(['MARK_PRICE', 'CONTRACT_PRICE']).default('CONTRACT_PRICE'),
   /** Сколько ждать пользовательский стоп, прежде чем выставить свой, мс. */
   defaultStopDelayMs: numFromEnv(2000),
 
@@ -312,6 +327,7 @@ export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config 
     maxPositionLeverage: env.ANTIAVG_MAX_POSITION_LEVERAGE,
     defaultStopEnabled: env.ANTIAVG_DEFAULT_STOP_ENABLED ?? 'false',
     defaultStopPct: env.ANTIAVG_DEFAULT_STOP_PCT,
+    stopWorkingType: env.ANTIAVG_STOP_WORKING_TYPE ?? 'CONTRACT_PRICE',
     defaultStopDelayMs: env.ANTIAVG_DEFAULT_STOP_DELAY_MS,
     protectStopOrders: env.ANTIAVG_PROTECT_STOP_ORDERS ?? 'false',
     maxRiskEnabled: env.ANTIAVG_MAX_RISK_ENABLED ?? 'false',

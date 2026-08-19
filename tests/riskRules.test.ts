@@ -14,6 +14,7 @@ import {
   stopKindOf,
 } from '../src/core/riskRules.js';
 import type { OrderRecord } from '../src/types.js';
+import { ConfigSchema } from '../src/config.js';
 
 function order(over: Partial<OrderRecord> = {}): OrderRecord {
   return {
@@ -217,5 +218,17 @@ describe('оценка риска по стопам', () => {
     const a = assessRisk(100, 100, [{ kind: 'fixed', stopPrice: limit }], balance, 2);
     expect(a.verdict).toBe('within');
     expect(a.risk).toBeCloseTo(a.maxRisk);
+  });
+});
+
+describe('цена срабатывания стопов сервиса', () => {
+  it('по умолчанию — цена последней сделки, как у стопов, выставленных руками', () => {
+    const cfg = ConfigSchema.parse({ apiKey: 'k', apiSecret: 's' });
+    expect(cfg.stopWorkingType).toBe('CONTRACT_PRICE');
+  });
+
+  it('переключается на mark price', () => {
+    const cfg = ConfigSchema.parse({ apiKey: 'k', apiSecret: 's', stopWorkingType: 'MARK_PRICE' });
+    expect(cfg.stopWorkingType).toBe('MARK_PRICE');
   });
 });

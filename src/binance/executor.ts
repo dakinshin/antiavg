@@ -196,9 +196,11 @@ export class BinanceExecutor implements ProtectiveExecutor {
    * снимает его, когда позиция закрыта. Количество при closePosition отправлять
    * нельзя — Binance отклонит ордер.
    *
-   * `workingType=MARK_PRICE`: по mark price считается ликвидация, и стоп,
-   * привязанный к цене последней сделки, на тонком рынке может не сработать
-   * там, где по марку позиция уже уничтожена.
+   * Цена срабатывания по умолчанию — цена последней сделки: стоп срабатывает
+   * там, где человек видит уровень, и одинаково со стопами, которые он ставит
+   * сам. Переключается на mark price настройкой `stopWorkingType` — тот
+   * устойчив к проколам стакана и совпадает с ценой, по которой считается
+   * ликвидация, но отрабатывает с задержкой около секунды.
    */
   async placeStop(spec: StopOrderSpec): Promise<StopPlacement> {
     const filters = await this.opts.exchangeInfo.ensure(spec.symbol);
@@ -230,7 +232,7 @@ export class BinanceExecutor implements ProtectiveExecutor {
       type: 'STOP_MARKET',
       triggerPrice: priceStr,
       closePosition: 'true',
-      workingType: 'MARK_PRICE',
+      workingType: this.opts.cfg.stopWorkingType,
       clientAlgoId,
     };
     if (this.opts.hedgeMode || spec.positionSide !== 'BOTH') {

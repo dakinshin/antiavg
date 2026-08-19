@@ -28,6 +28,10 @@ class RiskExecutorStub implements RiskExecutor {
   readonly actions: ProtectiveAction[] = [];
   readonly stops: StopOrderSpec[] = [];
   readonly cancelledOrderIds: number[] = [];
+  /** Порядок вызовов — Binance запрещает два closePosition-стопа в одну сторону. */
+  readonly calls: string[] = [];
+  /** Сколько стопов «уже стоит» на бирже: пока > 0, новый отклоняется как -4130. */
+  liveStops = 0;
   /** Следующий ответ на placeStop. orderId выдаётся уникальный, как биржа. */
   stopResult: StopPlacement = { placed: true };
   private stopSeq = 90000;
@@ -40,11 +44,17 @@ class RiskExecutorStub implements RiskExecutor {
 
   async cancelOrder(_symbol: string, orderId: number): Promise<{ cancelled: boolean }> {
     this.cancelledOrderIds.push(orderId);
+    this.calls.push(`cancel:${orderId}`);
+    if (this.liveStops > 0) this.liveStops--;
     return { cancelled: true };
   }
 
   async placeStop(spec: StopOrderSpec): Promise<StopPlacement> {
     this.stops.push(spec);
+    this.calls.push(`place:${spec.stopPrice}`);
+    // liveStops задаётся тестом явно: столько closePosition-стопов «уже висит»
+    // на бирже. Пока они есть, Binance отвечает на новый -4130.
+    if (this.liveStops > 0) return { placed: false, reason: 'already-protected', stopPrice: spec.stopPrice };
     const res: StopPlacement = { orderId: ++this.stopSeq, stopPrice: spec.stopPrice, ...this.stopResult };
     if (res.placed) this.lastStopOrderId = res.orderId ?? 0;
     return res;
@@ -494,6 +504,65 @@ describe('жёсткий лимит риска', () => {
     expect(h.executor.stops).toHaveLength(1);
     expect(h.executor.stops[0]?.stopPrice).toBeCloseTo(98);
     expect(h.executor.cancelledOrderIds).toContain(stopId);
+  });
+
+  it('дальний стоп снимается ДО постановки своего — иначе биржа его отклонит', async () => {
+    // Боевая аномалия 2026-08-19: сервис ставил свой стоп первым, Binance
+    // отвечал -4130 («closePosition-стоп в эту сторону уже есть»), и дальний
+    // стоп человека так и оставался на месте.
+    const h = harness({ maxRiskEnabled: true, maxRiskPct: 2 });
+    h.openPosition(10, 100);
+    const far = h.placeUserStop(90, 'SELL', 10);
+    h.executor.liveStops = 1; // стоп человека реально висит на бирже
+    await h.risk.settle();
+
+    expect(h.executor.calls).toEqual([`cancel:${far}`, 'place:98']);
+    expect(h.executor.stops).toHaveLength(1);
+    expect(h.executor.stops[0]?.stopPrice).toBeCloseTo(98);
+  });
+
+  it('если свой стоп после снятия чужого поставить не вышло — позиция закрывается', async () => {
+    const h = harness({ maxRiskEnabled: true, maxRiskPct: 2 });
+    h.openPosition(10, 100);
+    h.placeUserStop(90, 'SELL', 10);
+    h.executor.stopResult = { placed: false, reason: 'bad-price' };
+    await h.risk.settle();
+
+    // Дальний стоп снят, свой не встал — оставлять позицию голой нельзя.
+    expect(h.executor.actions.some((a) => a.mode === 'close')).toBe(true);
+    expect(h.logs.some((l) => l.level === 'error' && l.msg.includes('новый поставить не удалось'))).toBe(true);
+  });
+
+  it('сетевой сбой при постановке даёт одну повторную попытку, а не закрытие', async () => {
+    const h = harness({ maxRiskEnabled: true, maxRiskPct: 2 });
+    h.openPosition(10, 100);
+    h.placeUserStop(90, 'SELL', 10);
+
+    let attempt = 0;
+    const real = h.executor.placeStop.bind(h.executor);
+    h.executor.placeStop = async (spec) => {
+      attempt++;
+      if (attempt === 1) return { placed: false }; // сетевой чих без внятной причины
+      return real(spec);
+    };
+    await h.risk.settle();
+
+    expect(attempt).toBe(2);
+    // Позицию не закрыли — со второй попытки стоп встал.
+    expect(h.executor.actions).toHaveLength(0);
+  });
+
+  it('не снял чужой стоп — свой не ставит', async () => {
+    const h = harness({ maxRiskEnabled: true, maxRiskPct: 2 });
+    h.openPosition(10, 100);
+    h.placeUserStop(90, 'SELL', 10);
+    h.executor.cancelOrder = async () => {
+      throw new Error('Binance 400 DELETE /fapi/v1/algoOrder: timeout');
+    };
+    await h.risk.settle();
+
+    expect(h.executor.stops).toHaveLength(0);
+    expect(h.executor.actions).toHaveLength(0);
   });
 
   it('стоп в пределах лимита не трогается', async () => {

@@ -199,6 +199,7 @@ export class Guard {
       maxPositionLeverage: s.maxPositionLeverage,
       defaultStopEnabled: s.defaultStopEnabled,
       defaultStopPct: s.defaultStopPct,
+      stopWorkingType: s.stopWorkingType,
       protectStopOrders: s.protectStopOrders,
       maxRiskEnabled: s.maxRiskEnabled,
       maxRiskPct: s.maxRiskPct,

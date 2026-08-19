@@ -782,18 +782,27 @@ export class RiskGuard {
       return;
     }
 
-    // Сначала ставим новый стоп, потом снимаем старый: иначе между двумя
-    // операциями позиция осталась бы вовсе без защиты.
-    const placed = await this.placeStop(symbol, positionSide, limitPrice, 'лимит риска');
-    if (!placed.placed) return;
+    // Сначала СНИМАЕМ слишком дальний стоп, и только потом ставим свой.
+    //
+    // Хотелось наоборот — чтобы позиция ни мгновения не оставалась без защиты, —
+    // но Binance не разрешает два closePosition-стопа в одну сторону и отвечает
+    // на второй ошибкой -4130. При обратном порядке правило не срабатывало
+    // вообще никогда: старый стоп оставался на месте, новый биржа отклоняла.
+    //
+    // Отредактировать условный ордер нельзя: `PUT /fapi/v1/order` работает
+    // только с LIMIT, а для алго-ордеров изменение не поддерживается вовсе
+    // («Modification of untriggered conditional orders is not supported»).
+    // Снять и выставить заново — единственный доступный путь.
+    const tooFar = stops.filter(
+      (s) => assessRisk(pos.qty, pos.entryPrice, [s], balance, this.cfg.maxRiskPct).verdict === 'exceeded',
+    );
 
-    for (const s of stops) {
-      if (s.orderId === placed.orderId) continue;
-      const risk = assessRisk(pos.qty, pos.entryPrice, [s], balance, this.cfg.maxRiskPct);
-      if (risk.verdict !== 'exceeded') continue;
+    let cancelled = 0;
+    for (const s of tooFar) {
       this.ourCancels.add(s.orderId);
       try {
         await this.opts.executor.cancelOrder(symbol, s.orderId, { algo: true });
+        cancelled++;
       } catch (e) {
         this.ourCancels.delete(s.orderId);
         this.log.error('не удалось снять слишком дальний стоп', {
@@ -803,7 +812,35 @@ export class RiskGuard {
         });
       }
     }
-    this.riskState.set(positionKey(symbol, positionSide), 'within');
+    // Ни одного не сняли — ставить свой бессмысленно, биржа его отклонит.
+    if (tooFar.length > 0 && cancelled === 0) return;
+
+    let placed = await this.placeStop(symbol, positionSide, limitPrice, 'лимит риска');
+
+    // Одна повторная попытка. Дальний стоп уже снят, и закрывать позицию по
+    // рынку из-за сетевого чиха — слишком дорогая реакция на слишком частую
+    // причину. Повторяем ровно раз: если и она не прошла, дело не в связи.
+    if (!placed.placed && placed.reason === undefined) {
+      this.log.warn('стоп не встал с первой попытки — повторяю', { symbol, positionSide });
+      placed = await this.placeStop(symbol, positionSide, limitPrice, 'лимит риска (повтор)');
+    }
+
+    if (placed.placed || placed.reason === 'dry-run' || placed.reason === 'already-protected') {
+      this.riskState.set(positionKey(symbol, positionSide), 'within');
+      return;
+    }
+    // `would-trigger` закрывает позицию внутри placeStop — там уже всё сделано.
+    if (placed.reason === 'would-trigger') return;
+
+    // Дальний стоп сняли, свой поставить не смогли: позиция осталась голой по
+    // нашей вине. Оставлять её так нельзя — это ровно то, что запрещает
+    // включённый жёсткий лимит риска.
+    this.log.error('стоп снят, а новый поставить не удалось — закрываю позицию', {
+      symbol,
+      positionSide,
+      причина: placed.reason ?? 'неизвестна',
+    });
+    await this.closeAtMarket(symbol, positionSide, 'позиция осталась без стопа при подтягивании к лимиту риска');
   }
 
   /**

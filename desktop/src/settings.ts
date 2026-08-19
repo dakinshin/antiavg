@@ -27,6 +27,7 @@ export interface Settings {
   maxPositionLeverage: number;
   defaultStopEnabled: boolean;
   defaultStopPct: number;
+  stopWorkingType: 'MARK_PRICE' | 'CONTRACT_PRICE';
   protectStopOrders: boolean;
   maxRiskEnabled: boolean;
   maxRiskPct: number;
@@ -57,6 +58,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maxPositionLeverage: 3,
   defaultStopEnabled: false,
   defaultStopPct: 1,
+  stopWorkingType: 'CONTRACT_PRICE',
   protectStopOrders: false,
   maxRiskEnabled: false,
   maxRiskPct: 2,
