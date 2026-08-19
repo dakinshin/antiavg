@@ -1,5 +1,7 @@
 import type { Config } from '../config.js';
 import type { ExecutionOutcome, ProtectiveExecutor } from '../core/engine.js';
+import type { StopOrderSpec, StopPlacement } from '../core/riskGuard.js';
+import { roundStopToTick } from '../core/riskRules.js';
 import type { ProtectiveAction } from '../types.js';
 import type { BinanceRestClient } from './rest.js';
 import { BinanceApiError } from './rest.js';
@@ -16,6 +18,12 @@ const BENIGN_CODES = new Set([-2022, -2027, -4003, -1106]);
  * истёк, пока мы принимали решение. Это штатный исход гонки, не ошибка.
  */
 const ORDER_GONE_CODES = new Set([-2011, -2013]);
+
+/**
+ * «Order would immediately trigger» — цена уже прошла уровень стопа.
+ * Штатный ответ, а не поломка: значит, защищаться стопом уже поздно.
+ */
+const WOULD_TRIGGER_CODES = new Set([-2021]);
 
 export interface QtyResolution {
   ok: boolean;
@@ -160,6 +168,71 @@ export class BinanceExecutor implements ProtectiveExecutor {
           message: e.message,
         });
         return { executed: false, skipped: 'position-flat', error: e.message };
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Ставит защитный стоп на всю позицию.
+   *
+   * `closePosition=true`, а не `quantity` + `reduceOnly`: такой стоп закрывает
+   * позицию целиком, каким бы ни стал её объём после доливов, и биржа сама
+   * снимает его, когда позиция закрыта. Количество при closePosition отправлять
+   * нельзя — Binance отклонит ордер.
+   *
+   * `workingType=MARK_PRICE`: по mark price считается ликвидация, и стоп,
+   * привязанный к цене последней сделки, на тонком рынке может не сработать
+   * там, где по марку позиция уже уничтожена.
+   */
+  async placeStop(spec: StopOrderSpec): Promise<StopPlacement> {
+    const filters = await this.opts.exchangeInfo.ensure(spec.symbol);
+    const tick = filters?.tickSize ?? 0;
+    const rounded = roundStopToTick(spec.stopPrice, spec.positionQty, tick);
+    if (!Number.isFinite(rounded) || rounded <= 0) {
+      return { placed: false, reason: 'bad-price' };
+    }
+    const priceStr = tick > 0 ? formatByStep(rounded, tick) : String(rounded);
+    const newClientOrderId = this.clientOrderId();
+
+    const params: Record<string, string | number | boolean> = {
+      symbol: spec.symbol,
+      side: spec.side,
+      type: 'STOP_MARKET',
+      stopPrice: priceStr,
+      closePosition: 'true',
+      workingType: 'MARK_PRICE',
+      newClientOrderId,
+      newOrderRespType: 'RESULT',
+    };
+    if (this.opts.hedgeMode || spec.positionSide !== 'BOTH') {
+      params.positionSide =
+        spec.positionSide === 'BOTH' ? (spec.positionQty > 0 ? 'LONG' : 'SHORT') : spec.positionSide;
+    }
+
+    if (this.opts.cfg.dryRun) {
+      this.log.warn('DRY RUN: стоп НЕ выставлен', { ...params, повод: spec.reason });
+      return { placed: false, reason: 'dry-run', stopPrice: rounded, clientOrderId: newClientOrderId };
+    }
+
+    try {
+      const res = await this.opts.rest.signedPost<RawOrderResponse>('/fapi/v1/order', params);
+      return {
+        placed: true,
+        orderId: res.orderId,
+        clientOrderId: res.clientOrderId ?? newClientOrderId,
+        stopPrice: rounded,
+      };
+    } catch (e) {
+      if (e instanceof BinanceApiError && e.code !== undefined && WOULD_TRIGGER_CODES.has(e.code)) {
+        // Цена уже за стопом: биржа такой ордер не принимает. Это не сбой, а
+        // сигнал вызывающему, что ограничивать риск придётся закрытием позиции.
+        this.log.warn('стоп сработал бы сразу — биржа отклонила ордер', {
+          symbol: spec.symbol,
+          stopPrice: priceStr,
+          code: e.code,
+        });
+        return { placed: false, reason: 'would-trigger', stopPrice: rounded };
       }
       throw e;
     }

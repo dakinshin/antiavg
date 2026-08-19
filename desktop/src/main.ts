@@ -34,6 +34,7 @@ const guard = new Guard(
   () => pushState(),
   (e) => win?.webContents.send('guard:event', e),
   (e) => notifyDetection(e),
+  (title, body) => notify(title, body),
 );
 
 function pushState(): void {
@@ -47,15 +48,15 @@ function pushState(): void {
   }
 }
 
-function notifyDetection(e: GuardEvent): void {
+function notify(title: string, body: string, urgency: 'normal' | 'critical' = 'normal'): void {
   if (!Notification.isSupported()) return;
-  new Notification({
-    title: `AntiAvg: ${e.symbol ?? 'позиция'}`,
-    body: `Усреднение в убытке — ${e.text}`,
-    urgency: 'critical',
-  })
+  new Notification({ title, body, urgency })
     .on('click', () => showWindow())
     .show();
+}
+
+function notifyDetection(e: GuardEvent): void {
+  notify(`AntiAvg: ${e.symbol ?? 'позиция'}`, `Усреднение в убытке — ${e.text}`, 'critical');
 }
 
 function buildTrayMenu(): Menu {
@@ -234,6 +235,10 @@ const WEAKENING: Array<{ key: keyof Settings; weakValue: boolean; label: string 
   { key: 'lockStopWhileInDrawdown', weakValue: false, label: 'Не выключать защиту при просадке' },
   { key: 'dryRun', weakValue: true, label: 'Режим наблюдения (без реальных ордеров)' },
   { key: 'cancelDangerousOrders', weakValue: false, label: 'Снимать опасные ордера' },
+  { key: 'maxPositionEnabled', weakValue: false, label: 'Ограничивать объём позиции' },
+  { key: 'defaultStopEnabled', weakValue: false, label: 'Дефолтный стоп' },
+  { key: 'protectStopOrders', weakValue: false, label: 'Не разрешать снимать стоп' },
+  { key: 'maxRiskEnabled', weakValue: false, label: 'Жёстко ограничивать риск' },
 ];
 
 ipcMain.handle('settings:save', async (_e, incoming: Partial<Settings>) => {

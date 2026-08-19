@@ -47,6 +47,46 @@ export class AccountService {
     return raw.map((r) => positionRiskToSnapshot(r, at)).filter((p) => !isZero(p.qty));
   }
 
+  /**
+   * Депозит счёта — `totalWalletBalance`, без нереализованного PnL.
+   *
+   * Именно от него считаются лимит плеча и лимит риска. База намеренно не
+   * «дышит» вместе с рынком: иначе просадка сама по себе ужимала бы разрешённый
+   * объём и провоцировала срезку позиции в худший момент.
+   */
+  async fetchWalletBalance(): Promise<number> {
+    let raw: { totalWalletBalance?: string };
+    try {
+      raw = await this.rest.signedGet<{ totalWalletBalance?: string }>('/fapi/v3/account');
+    } catch (e) {
+      if (e instanceof BinanceApiError && (e.status === 404 || e.code === -1121 || e.code === -1102)) {
+        raw = await this.rest.signedGet<{ totalWalletBalance?: string }>('/fapi/v2/account');
+      } else {
+        throw e;
+      }
+    }
+    const balance = toNum(raw.totalWalletBalance);
+    if (!Number.isFinite(balance) || balance <= 0) {
+      throw new Error(`биржа вернула непригодный баланс: ${String(raw.totalWalletBalance)}`);
+    }
+    return balance;
+  }
+
+  /**
+   * Mark price символа. Публичный запрос без подписи.
+   *
+   * Именно mark price, а не last price: по нему биржа считает нереализованный
+   * PnL и по нему же срабатывают стопы с `workingType=MARK_PRICE`.
+   */
+  async fetchMarkPrice(symbol: string): Promise<number> {
+    const raw = await this.rest.publicGet<{ markPrice?: string }>('/fapi/v1/premiumIndex', { symbol });
+    const price = toNum(raw.markPrice);
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new Error(`биржа вернула непригодную mark price для ${symbol}: ${String(raw.markPrice)}`);
+    }
+    return price;
+  }
+
   async fetchOpenOrders(): Promise<OrderRecord[]> {
     const raw = await this.rest.signedGet<RawOpenOrder[]>('/fapi/v1/openOrders');
     return raw.map((o) => openOrderToRecord(o, this.clientOrderIdPrefix));

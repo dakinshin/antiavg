@@ -196,6 +196,16 @@ export function fillEvent(init: FillEventInit): RawOrderTradeUpdate {
   };
 }
 
+/** Событие смены статуса ордера (CANCELED / EXPIRED / ...). */
+export function orderStatusEvent(
+  init: OrderEventInit & { status: string; execType?: string },
+): RawOrderTradeUpdate {
+  const base = newOrderEvent(init);
+  base.o.x = init.execType ?? init.status;
+  base.o.X = init.status;
+  return base;
+}
+
 export function accountUpdate(
   positions: Array<{ symbol?: string; qty: number; entryPrice: number; positionSide?: PositionSide }>,
   timeMs: number,

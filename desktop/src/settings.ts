@@ -23,6 +23,13 @@ export interface Settings {
   cancelDangerousOrders: boolean;
   lockStopWhileInDrawdown: boolean;
   lockSettingsWhileInDrawdown: boolean;
+  maxPositionEnabled: boolean;
+  maxPositionLeverage: number;
+  defaultStopEnabled: boolean;
+  defaultStopPct: number;
+  protectStopOrders: boolean;
+  maxRiskEnabled: boolean;
+  maxRiskPct: number;
   symbols: string;
   maxActionsPerHour: number;
   onQtyBelowMin: 'skip' | 'close';
@@ -44,6 +51,13 @@ export const DEFAULT_SETTINGS: Settings = {
   cancelDangerousOrders: true,
   lockStopWhileInDrawdown: true,
   lockSettingsWhileInDrawdown: false,
+  maxPositionEnabled: false,
+  maxPositionLeverage: 3,
+  defaultStopEnabled: false,
+  defaultStopPct: 1,
+  protectStopOrders: false,
+  maxRiskEnabled: false,
+  maxRiskPct: 2,
   symbols: '',
   maxActionsPerHour: 30,
   onQtyBelowMin: 'skip',

@@ -157,6 +157,52 @@
         <div class="desc">Строже предыдущего: при просадке не сохраняется ни одна настройка,
           включая саму эту галку. Включайте осознанно — передумать до закрытия позиции
           не выйдет.</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Управление риском</legend>
+        <div class="desc">Все четыре правила по умолчанию выключены и действуют только на позиции,
+          открытые при работающей программе. Перезапуск не приводит к залпу ордеров по старым позициям.</div>
+        <div class="field">
+          <label for="sMaxPos">Ограничивать объём позиции</label>
+          <input type="checkbox" id="sMaxPos">
+        </div>
+        <div class="field">
+          <label for="sMaxPosLev">Максимум плеч к депозиту</label>
+          <input type="number" id="sMaxPosLev" min="0" step="0.1">
+        </div>
+        <div class="desc">Номинал позиции не выше «плечо × депозит». Превышение срезается по рынку —
+          в том числе при доливе в прибыльную позицию.</div>
+        <div class="field">
+          <label for="sDefStop">Ставить стоп, если его нет</label>
+          <input type="checkbox" id="sDefStop">
+        </div>
+        <div class="field">
+          <label for="sDefStopPct">Отступ дефолтного стопа, %</label>
+          <input type="number" id="sDefStopPct" min="0" step="0.1">
+        </div>
+        <div class="desc">Если через 2 секунды после открытия позиции стопа нет, программа ставит свой.
+          Если цена уже за этим уровнем — закрывает позицию по рынку.</div>
+        <div class="field">
+          <label for="sProtectStop">Не разрешать снимать стоп</label>
+          <input type="checkbox" id="sProtectStop">
+        </div>
+        <div class="desc">Снятый вручную стоп возвращается на прежнюю цену. Сработавший стоп
+          и стоп, снятый биржей при закрытии позиции, не восстанавливаются.</div>
+        <div class="field">
+          <label for="sMaxRisk">Жёстко ограничивать риск</label>
+          <input type="checkbox" id="sMaxRisk">
+        </div>
+        <div class="field">
+          <label for="sMaxRiskPct">Предельный риск, % депозита</label>
+          <input type="number" id="sMaxRiskPct" min="0" step="0.1">
+        </div>
+        <div class="desc">Включено — стоп не уезжает дальше предела, а если цена уже там, позиция
+          закрывается по рынку. Выключено — программа только уведомляет: риск превышен либо в норме.</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Охват и предохранители</legend>
         <div class="field">
           <label for="sSymbols">Символы</label>
           <input type="text" id="sSymbols" placeholder="пусто = все, иначе BTCUSDT,ETHUSDT">

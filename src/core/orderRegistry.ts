@@ -68,6 +68,23 @@ export class OrderRegistry {
     return [...this.byId.values()];
   }
 
+  /** Ордер ещё живой (не отменён, не исполнен, не истёк). */
+  isOpen(orderId: number): boolean {
+    return this.byId.has(orderId) && !this.closedAt.has(orderId);
+  }
+
+  /**
+   * Только живые ордера.
+   *
+   * `all()` намеренно отдаёт и завершённые — они нужны логам и разбору
+   * исполнений. Но всё, что принимает решение «есть ли сейчас такая заявка»,
+   * должно спрашивать именно `open()`: иначе снятый стоп продолжал бы
+   * считаться защитой ещё десять минут.
+   */
+  open(): OrderRecord[] {
+    return this.all().filter((o) => !this.closedAt.has(o.orderId));
+  }
+
   clear(): void {
     this.byId.clear();
     this.closedAt.clear();

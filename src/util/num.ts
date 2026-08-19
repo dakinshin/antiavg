@@ -38,6 +38,17 @@ export function roundToStep(value: number, step: number): number {
   return result / scale;
 }
 
+/** Округление вверх до кратного шагу. */
+export function ceilToStep(value: number, step: number): number {
+  if (!Number.isFinite(step) || step <= 0) return value;
+  const d = stepDecimals(step);
+  const scale = Math.pow(10, d);
+  const scaledStep = Math.round(step * scale);
+  const scaledValue = Math.ceil(value * scale - 1e-6);
+  const result = Math.ceil(scaledValue / scaledStep) * scaledStep;
+  return result / scale;
+}
+
 /** Строковое представление без экспоненты, с фиксированным числом знаков шага. */
 export function formatByStep(value: number, step: number): string {
   const d = stepDecimals(step);

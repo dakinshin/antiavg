@@ -1,6 +1,7 @@
 import type { Config } from '../config.js';
 import { isSymbolWatched } from '../config.js';
 import { analyzeFill, analyzePendingOrder, SKIP_REASON_TEXT } from './detector.js';
+import { ActionLimiter } from './actionLimiter.js';
 import { OrderRegistry } from './orderRegistry.js';
 import { PositionStore } from './positionStore.js';
 import { isZero, round8, sameSign } from '../util/num.js';
@@ -53,6 +54,12 @@ export interface EngineOptions {
   logger?: Logger;
   now?: () => number;
   hooks?: EngineHooks;
+  /**
+   * Общий предохранитель. Если не передан — создаётся свой. Передавать нужно,
+   * когда действия отправляет не только детектор усреднения: лимит в час
+   * относится ко всему счёту, а не к каждому механизму по отдельности.
+   */
+  limiter?: ActionLimiter;
 }
 
 interface PendingAction {
@@ -99,9 +106,8 @@ export class Engine {
   private prevOpenOrders = new Map<number, OrderRecord>();
   private filledCandidates: OrderRecord[] = [];
 
-  /** Времена отправленных защитных действий — для часового предохранителя. */
-  private readonly actionTimestamps: number[] = [];
-  private tripped = false;
+  /** Часовой предохранитель — возможно, общий с риск-модулем. */
+  private readonly limiter: ActionLimiter;
 
   /** Ордера, по которым отмена уже отправлена — чтобы не долбить повторно. */
   private readonly cancelRequested = new Set<number>();
@@ -121,6 +127,16 @@ export class Engine {
     this.log = opts.logger ?? noopLogger;
     this.now = opts.now ?? (() => Date.now());
     this.hooks = opts.hooks ?? {};
+    this.limiter =
+      opts.limiter ??
+      new ActionLimiter(this.cfg.maxActionsPerHour, (count, limit) => {
+        this.log.error('ПРЕДОХРАНИТЕЛЬ: защитные действия остановлены', {
+          заЧас: count,
+          лимит: limit,
+          что_делать:
+            'проверьте логи и позиции вручную; лимит меняется через ANTIAVG_MAX_ACTIONS_PER_HOUR',
+        });
+      });
   }
 
   /** Регистрация ордера (событие NEW и любые последующие). */
@@ -152,7 +168,7 @@ export class Engine {
     const pos = this.positions.peek(symbol, positionSide);
     if (!pos || isZero(pos.qty)) return;
 
-    for (const order of this.orders.all()) {
+    for (const order of this.orders.open()) {
       if (order.symbol !== symbol || order.positionSide !== positionSide) continue;
       if (this.cancelRequested.has(order.orderId)) continue;
 
@@ -212,6 +228,10 @@ export class Engine {
       const current = nowIds.get(orderId);
       if (!current) {
         candidates.push(prev);
+        // Ордер был в прошлом снимке и пропал из нового — значит, он исполнился,
+        // снят или истёк, возможно пока сервис не работал. Без этой отметки
+        // снятый стоп продолжал бы числиться живым и считаться защитой.
+        this.orders.markClosed(orderId, this.now());
       } else if (current.executedQty > prev.executedQty + 1e-12) {
         candidates.push(current);
       }
@@ -607,28 +627,6 @@ export class Engine {
 
     const nowMs = this.now();
 
-    // Предохранитель. Если защитных ордеров за час стало больше лимита, значит
-    // что-то идёт не так: лучше остановиться и разбудить человека, чем молотить
-    // рыночными ордерами по счёту.
-    if (this.cfg.maxActionsPerHour > 0) {
-      const hourAgo = nowMs - 3600_000;
-      while (this.actionTimestamps.length > 0 && this.actionTimestamps[0]! < hourAgo) {
-        this.actionTimestamps.shift();
-      }
-      if (this.actionTimestamps.length >= this.cfg.maxActionsPerHour) {
-        if (!this.tripped) {
-          this.tripped = true;
-          this.log.error('ПРЕДОХРАНИТЕЛЬ: защитные действия остановлены', {
-            заЧас: this.actionTimestamps.length,
-            лимит: this.cfg.maxActionsPerHour,
-            что_делать:
-              'проверьте логи и позиции вручную; лимит меняется через ANTIAVG_MAX_ACTIONS_PER_HOUR',
-          });
-        }
-        return null;
-      }
-    }
-
     const last = this.lastActionAtMs.get(key);
     if (last !== undefined && nowMs - last < this.cfg.cooldownMs) {
       this.log.warn('cooldown, защитное действие пропущено', { key, sinceMs: nowMs - last });
@@ -657,9 +655,13 @@ export class Engine {
       triggers: entry.triggers,
     };
 
+    // Предохранитель. Если защитных ордеров за час стало больше лимита, значит
+    // что-то идёт не так: лучше остановиться и разбудить человека, чем молотить
+    // рыночными ордерами по счёту.
+    if (!this.limiter.allow(nowMs)) return null;
+
     this.inFlight.add(key);
     this.lastActionAtMs.set(key, nowMs);
-    this.actionTimestamps.push(nowMs);
     try {
       const outcome = await this.executor.execute(action);
       this.hooks.onAction?.(action, outcome);
@@ -732,8 +734,8 @@ export class Engine {
       снятоОрдеров: this.cancelledOrders,
       дубликатовСделок: this.duplicateFills,
       desyncs: this.desyncs,
-      действийЗаЧас: this.actionTimestamps.length,
-      предохранитель: this.tripped ? 'СРАБОТАЛ' : 'ок',
+      действийЗаЧас: this.limiter.count(),
+      предохранитель: this.limiter.tripped() ? 'СРАБОТАЛ' : 'ок',
       openPositions: this.positions.open().length,
     };
   }

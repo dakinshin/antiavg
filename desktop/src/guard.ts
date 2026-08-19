@@ -35,6 +35,8 @@ export interface CoreSnapshot {
   running: boolean;
   hedgeMode: boolean;
   engine: Record<string, unknown> | null;
+  /** Счётчики риск-модуля; null, если ни одно правило не включено. */
+  risk: Record<string, unknown> | null;
   ws: { messages: number; pings: number; connectedAtMs: number; lastMessageAtMs: number } | null;
   positions: Array<{
     symbol: string;
@@ -130,6 +132,8 @@ export class Guard {
     private readonly onChange: () => void,
     private readonly onEvent: (e: GuardEvent) => void,
     private readonly onDetection: (e: GuardEvent) => void,
+    /** Системное уведомление, не связанное со срабатыванием защиты. */
+    private readonly onNotice: (title: string, body: string) => void = () => undefined,
   ) {}
 
   private push(kind: EventKind, text: string, extra: Partial<GuardEvent> = {}): GuardEvent {
@@ -181,6 +185,13 @@ export class Guard {
       cancelDangerousOrders: s.cancelDangerousOrders,
       lockStopWhileInDrawdown: s.lockStopWhileInDrawdown,
       lockSettingsWhileInDrawdown: s.lockSettingsWhileInDrawdown,
+      maxPositionEnabled: s.maxPositionEnabled,
+      maxPositionLeverage: s.maxPositionLeverage,
+      defaultStopEnabled: s.defaultStopEnabled,
+      defaultStopPct: s.defaultStopPct,
+      protectStopOrders: s.protectStopOrders,
+      maxRiskEnabled: s.maxRiskEnabled,
+      maxRiskPct: s.maxRiskPct,
       symbols: s.symbols,
       maxActionsPerHour: s.maxActionsPerHour,
       onQtyBelowMin: s.onQtyBelowMin,
@@ -256,6 +267,31 @@ export class Guard {
               symbol: d.fill?.symbol,
               amount: d.fill?.side === 'BUY' ? d.fill?.lastFilledQty : -(d.fill?.lastFilledQty ?? 0),
             });
+          },
+        },
+        riskHooks: {
+          onPositionCapped: (i: any) => {
+            this.push('action', `объём выше потолка — срезано ${i.excessQty}`, { symbol: i.symbol });
+            this.onChange();
+          },
+          onStopPlaced: (i: any) => {
+            this.push(i.placed ? 'action' : 'warn', i.placed
+              ? `стоп выставлен на ${i.stopPrice} (${i.reason})`
+              : `стоп выставить не удалось: ${i.reason}`, { symbol: i.symbol });
+            this.onChange();
+          },
+          onForcedClose: (i: any) => {
+            this.alarmUntilMs = Date.now() + 60_000;
+            this.push('action', `позиция закрыта по рынку: ${i.reason}`, { symbol: i.symbol });
+            this.onNotice(`AntiAvg: ${i.symbol}`, `Позиция закрыта по рынку — ${i.reason}`);
+            this.onChange();
+          },
+          onRiskStatus: (i: any) => {
+            // Уведомление приходит только при СМЕНЕ состояния риска, поэтому
+            // показываем его в трее, не боясь превратить это в поток.
+            this.push(i.verdict === 'within' ? 'info' : 'warn', i.text, { symbol: i.symbol });
+            this.onNotice('AntiAvg: риск по позиции', i.text);
+            this.onChange();
           },
         },
         onStreamState: (st: { connected: boolean; reason: string }) => {

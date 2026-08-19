@@ -23,6 +23,8 @@ import {
   type RawUserDataEvent,
 } from './binance/mappers.js';
 import { Engine, type EngineHooks } from './core/engine.js';
+import { ActionLimiter } from './core/actionLimiter.js';
+import { RiskGuard, type RiskHooks } from './core/riskGuard.js';
 import type { Logger } from './util/logger.js';
 import { positionKey } from './types.js';
 import { isZero } from './util/num.js';
@@ -33,6 +35,8 @@ export interface AppDeps {
   logger: Logger;
   /** Внешний слой (десктоп-обёртка) подписывается на срабатывания и действия. */
   hooks?: EngineHooks;
+  /** Отдельные хуки риск-модуля: срезка объёма, стопы, уведомления о риске. */
+  riskHooks?: RiskHooks;
   /** Вызывается при каждом изменении состояния потока — для индикатора в трее. */
   onStreamState?: (state: { connected: boolean; reason: string }) => void;
 }
@@ -42,6 +46,7 @@ export interface AppSnapshot {
   running: boolean;
   hedgeMode: boolean;
   engine: ReturnType<Engine['stats']> | null;
+  risk: ReturnType<RiskGuard['stats']> | null;
   ws: { messages: number; pings: number; connectedAtMs: number; lastMessageAtMs: number } | null;
   positions: Array<{
     symbol: string;
@@ -60,6 +65,7 @@ export class App {
   private readonly account: AccountService;
   private stream: UserDataStream | null = null;
   private engine: Engine | null = null;
+  private risk: RiskGuard | null = null;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private statsTimer: ReturnType<typeof setInterval> | null = null;
   private hedgeMode = false;
@@ -156,12 +162,47 @@ export class App {
       hedgeMode: this.hedgeMode,
     });
 
+    // Предохранитель общий: лимит действий в час относится ко всему счёту,
+    // а не к каждому механизму по отдельности.
+    const limiter = new ActionLimiter(cfg.maxActionsPerHour, (count, limit) => {
+      logger.error('ПРЕДОХРАНИТЕЛЬ: защитные действия остановлены', {
+        заЧас: count,
+        лимит: limit,
+        что_делать: 'проверьте логи и позиции вручную; лимит меняется через ANTIAVG_MAX_ACTIONS_PER_HOUR',
+      });
+    });
+
     this.engine = new Engine({
       cfg,
       executor,
+      limiter,
       logger: logger.child({ mod: 'engine' }),
       ...(this.deps.hooks ? { hooks: this.deps.hooks } : {}),
     });
+
+    this.risk = new RiskGuard({
+      cfg,
+      executor,
+      limiter,
+      positions: this.engine.positions,
+      orders: this.engine.orders,
+      hedgeMode: this.hedgeMode,
+      logger: logger.child({ mod: 'risk' }),
+      market: {
+        walletBalance: () => this.account.fetchWalletBalance(),
+        markPrice: (symbol) => this.account.fetchMarkPrice(symbol),
+        filters: (symbol) => this.exchangeInfo.ensure(symbol),
+      },
+      ...(this.deps.riskHooks ? { hooks: this.deps.riskHooks } : {}),
+    });
+    if (this.risk.active) {
+      logger.warn('включены правила управления риском', {
+        лимитОбъёма: cfg.maxPositionEnabled ? `${cfg.maxPositionLeverage}× депозита` : 'выкл',
+        дефолтныйСтоп: cfg.defaultStopEnabled ? `${cfg.defaultStopPct}% через ${cfg.defaultStopDelayMs} мс` : 'выкл',
+        защитаСтопа: cfg.protectStopOrders ? 'вкл' : 'выкл',
+        лимитРиска: cfg.maxRiskEnabled ? `${cfg.maxRiskPct}% депозита` : 'только уведомления',
+      });
+    }
 
     await this.bootstrapState(snapshot.positions, snapshot.openOrders, true);
 
@@ -194,6 +235,7 @@ export class App {
         if (!engine) return;
         logger.info('состояние сервиса', {
           ...engine.stats(),
+          ...(this.risk?.active ? this.risk.stats() : {}),
           ws: this.stream?.stats(),
           события: Object.fromEntries(this.eventCounts),
         });
@@ -291,6 +333,7 @@ export class App {
         }
       }
 
+      this.risk?.onReconcile();
       logger.debug('сверка выполнена', { reason, positions: positions.length, openOrders: openOrders.length });
     } catch (e) {
       logger.error('сверка не удалась', { reason, error: String(e) });
@@ -314,8 +357,16 @@ export class App {
         const raw = evt as RawOrderTradeUpdate;
         if (!isSymbolWatched(cfg, raw.o.s)) return;
         if (!this.exchangeInfo.has(raw.o.s)) this.exchangeInfo.warm([raw.o.s]);
-        engine.onOrderEvent(toOrderLifecycleEvent(raw, cfg.clientOrderIdPrefix));
-        if (isFillEvent(raw)) engine.onFill(toFillEvent(raw));
+        const lifecycle = toOrderLifecycleEvent(raw, cfg.clientOrderIdPrefix);
+        engine.onOrderEvent(lifecycle);
+        if (isFillEvent(raw)) {
+          const fill = toFillEvent(raw);
+          engine.onFill(fill);
+          this.risk?.onFill(fill.symbol, fill.positionSide);
+        }
+        // Порядок важен: сначала модель позиции обновлена исполнением, и только
+        // потом риск-модуль смотрит на стопы — иначе он судил бы по старому объёму.
+        this.risk?.onOrderEvent(lifecycle);
         return;
       }
       case 'ACCOUNT_UPDATE': {
@@ -339,7 +390,10 @@ export class App {
         const raw = evt as RawTradeLite;
         if (!isSymbolWatched(cfg, raw.s)) return;
         const fill = tradeLiteToFillEvent(raw, engine.orders.get(raw.i), this.hedgeMode);
-        if (fill) engine.onFill(fill);
+        if (fill) {
+          engine.onFill(fill);
+          this.risk?.onFill(fill.symbol, fill.positionSide);
+        }
         else logger.debug('TRADE_LITE без известного ордера в hedge mode — жду ORDER_TRADE_UPDATE', { symbol: raw.s });
         return;
       }
@@ -375,6 +429,7 @@ export class App {
       running: this.engine !== null,
       hedgeMode: this.hedgeMode,
       engine: this.engine ? this.engine.stats() : null,
+      risk: this.risk ? this.risk.stats() : null,
       ws: this.stream ? this.stream.stats() : null,
       positions: this.engine
         ? this.engine.positions.open().map((p) => ({
@@ -396,6 +451,7 @@ export class App {
     this.reconcileTimer = null;
     this.statsTimer = null;
     this.engine?.stop();
+    this.risk?.stop();
     await this.stream?.stop();
     this.deps.logger.info('сервис остановлен');
   }

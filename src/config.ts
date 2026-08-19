@@ -157,6 +157,43 @@ export const ConfigSchema = z.object({
    * просадки от комиссии.
    */
   drawdownLockMinLoss: numFromEnv(0),
+  /** --- Лимит объёма позиции --- */
+  /**
+   * Ограничивать номинал позиции величиной `maxPositionLeverage × депозит`.
+   * Проверяется после каждого исполнения, в том числе при доливе в прибыльную
+   * позицию: правило про объём не зависит от того, в плюсе позиция или в минусе.
+   */
+  maxPositionEnabled: boolFromEnv.default(false),
+  /** Во сколько раз номинал позиции может превышать депозит. */
+  maxPositionLeverage: numFromEnv(3),
+
+  /** --- Дефолтный стоп --- */
+  /**
+   * Если через defaultStopDelayMs после открытия позиции стоп так и не появился,
+   * выставить свой. Позиция без стопа — это неограниченный убыток, и молчаливо
+   * соглашаться на него сервис не должен.
+   */
+  defaultStopEnabled: boolFromEnv.default(false),
+  /** Отступ дефолтного стопа от средней цены входа, % от цены. */
+  defaultStopPct: numFromEnv(1),
+  /** Сколько ждать пользовательский стоп, прежде чем выставить свой, мс. */
+  defaultStopDelayMs: numFromEnv(2000),
+
+  /** --- Защита стоп-ордера от снятия --- */
+  /** Снятый стоп восстанавливать на прежнем месте, пока позиция открыта. */
+  protectStopOrders: boolFromEnv.default(false),
+
+  /** --- Лимит риска по позиции --- */
+  /**
+   * Жёстко ограничивать риск (расстояние до стопа × объём) долей депозита.
+   * Выключено — сервис только уведомляет о состоянии риска, ничего не меняя.
+   */
+  maxRiskEnabled: boolFromEnv.default(false),
+  /** Предельный риск по одной позиции, % от депозита. */
+  maxRiskPct: numFromEnv(2),
+  /** Сколько держать значение депозита из кеша, мс. */
+  balanceCacheMs: numFromEnv(30_000),
+
   /** Отменять оставшиеся открытые ордера по символу после реакции. */
   cancelOpenOrdersOnReaction: boolFromEnv.default(false),
   /** Префикс clientOrderId для собственных защитных ордеров. */
@@ -271,6 +308,15 @@ export function loadConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Config 
     lockStopWhileInDrawdown: env.ANTIAVG_LOCK_STOP_IN_DRAWDOWN ?? 'true',
     lockSettingsWhileInDrawdown: env.ANTIAVG_LOCK_SETTINGS_IN_DRAWDOWN ?? 'false',
     drawdownLockMinLoss: env.ANTIAVG_DRAWDOWN_LOCK_MIN_LOSS,
+    maxPositionEnabled: env.ANTIAVG_MAX_POSITION_ENABLED ?? 'false',
+    maxPositionLeverage: env.ANTIAVG_MAX_POSITION_LEVERAGE,
+    defaultStopEnabled: env.ANTIAVG_DEFAULT_STOP_ENABLED ?? 'false',
+    defaultStopPct: env.ANTIAVG_DEFAULT_STOP_PCT,
+    defaultStopDelayMs: env.ANTIAVG_DEFAULT_STOP_DELAY_MS,
+    protectStopOrders: env.ANTIAVG_PROTECT_STOP_ORDERS ?? 'false',
+    maxRiskEnabled: env.ANTIAVG_MAX_RISK_ENABLED ?? 'false',
+    maxRiskPct: env.ANTIAVG_MAX_RISK_PCT,
+    balanceCacheMs: env.ANTIAVG_BALANCE_CACHE_MS,
     maxActionsPerHour: env.ANTIAVG_MAX_ACTIONS_PER_HOUR,
     cancelOpenOrdersOnReaction: env.ANTIAVG_CANCEL_OPEN_ORDERS ?? 'false',
     clientOrderIdPrefix: env.ANTIAVG_CLIENT_ORDER_ID_PREFIX ?? 'antiavg',
