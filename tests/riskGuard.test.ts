@@ -197,10 +197,10 @@ describe('лимит объёма позиции', () => {
     h.risk.onFill('BTCUSDT', 'BOTH');
     await h.risk.settle();
 
-    // 30 по 110 = 3300 при потолке 3000 -> срезать примерно 2.727.
+    // Средняя стала (20·100 + 10·110)/30 = 103.33; номинал 3100 при потолке 3000.
     expect(h.executor.actions).toHaveLength(1);
-    expect(h.executor.actions[0]?.requestedQty).toBeGreaterThan(2.7);
-    expect(h.executor.actions[0]?.requestedQty).toBeLessThan(2.8);
+    expect(h.executor.actions[0]?.requestedQty).toBeGreaterThan(0.9);
+    expect(h.executor.actions[0]?.requestedQty).toBeLessThan(1.1);
   });
 
   it('шорт срезается покупкой', async () => {
@@ -208,6 +208,55 @@ describe('лимит объёма позиции', () => {
     h.openPosition(50, 100, 'SELL');
     await h.risk.settle();
     expect(h.executor.actions[0]?.side).toBe('BUY');
+  });
+
+  it('движение цены НЕ вызывает повторных срезок', async () => {
+    // Боевая аномалия 2026-08-19 (BTRUSDT): одна позиция получила четыре срезки
+    // за две с половиной минуты, потому что номинал считался по текущей цене и
+    // сам выползал за потолок вслед за рынком.
+    const h = harness({ maxPositionEnabled: true, maxPositionLeverage: 3 });
+    h.openPosition(50, 100); // 5000 при потолке 3000
+    await h.risk.settle();
+    expect(h.executor.actions).toHaveLength(1);
+    expect(h.executor.actions[0]?.requestedQty).toBeCloseTo(20);
+
+    // Цена пошла вверх — рыночная стоимость остатка выросла, но объём тот же.
+    for (const price of [110, 130, 160]) {
+      h.market.price = price;
+      h.risk.onReconcile();
+      await h.risk.settle();
+    }
+    expect(h.executor.actions).toHaveLength(1);
+  });
+
+  it('долив сверх потолка срезается — правило смотрит на РОСТ позиции', async () => {
+    const h = harness({ maxPositionEnabled: true, maxPositionLeverage: 3 });
+    h.openPosition(20, 100); // 2000 — в пределах
+    await h.risk.settle();
+    expect(h.executor.actions).toHaveLength(0);
+
+    const addId = nextOrderId();
+    feed(h.engine, newOrderEvent({ orderId: addId, side: 'BUY', qty: 20, type: 'MARKET', timeMs: h.clock.now() }));
+    feed(h.engine, fillEvent({ orderId: addId, side: 'BUY', lastQty: 20, lastPrice: 100, type: 'MARKET', timeMs: h.clock.now() }));
+    h.risk.onFill('BTCUSDT', 'BOTH');
+    await h.risk.settle();
+
+    // 40 по средней 100 = 4000 при потолке 3000 -> срезать 10.
+    expect(h.executor.actions).toHaveLength(1);
+    expect(h.executor.actions[0]?.requestedQty).toBeCloseTo(10);
+  });
+
+  it('срезка сообщает, сколько осталось в позиции', async () => {
+    const h = harness({ maxPositionEnabled: true, maxPositionLeverage: 3 });
+    const capped: Array<{ excessQty: number; remainingQty: number; executed: boolean }> = [];
+    (h.risk as unknown as { hooks: Record<string, unknown> }).hooks.onPositionCapped = (i: never) => capped.push(i);
+    h.openPosition(50, 100);
+    await h.risk.settle();
+
+    expect(capped).toHaveLength(1);
+    expect(capped[0]?.excessQty).toBeCloseTo(20);
+    expect(capped[0]?.remainingQty).toBeCloseTo(30);
+    expect(capped[0]?.executed).toBe(true);
   });
 
   it('выключенная настройка ничего не срезает', async () => {

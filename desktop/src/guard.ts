@@ -291,7 +291,20 @@ export class Guard {
         },
         riskHooks: {
           onPositionCapped: (i: any) => {
-            this.push('action', `объём выше потолка — срезано ${i.excessQty}`, { symbol: i.symbol });
+            const text = i.executed
+              ? `объём выше потолка — срезано ${i.excessQty}, в позиции осталось ${i.remainingQty}`
+              : `объём выше потолка, но срезать не удалось (${i.excessQty})`;
+            this.push(i.executed ? 'action' : 'warn', text, { symbol: i.symbol, amount: -i.excessQty });
+            // Уведомление обязательно: программа изменила размер позиции без
+            // ведома человека. Если он закроет её «своим» объёмом, он откроет
+            // встречную позицию на срезанную величину — и узнает об этом постфактум.
+            if (i.executed) {
+              this.onNotice(
+                `AntiAvg: ${i.symbol}`,
+                `Объём срезан до потолка: продано ${i.excessQty}, в позиции осталось ${i.remainingQty}. ` +
+                  `Учитывайте это при закрытии вручную.`,
+              );
+            }
             this.onChange();
           },
           onStopPlaced: (i: any) => {

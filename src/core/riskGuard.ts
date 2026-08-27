@@ -91,7 +91,15 @@ export interface RiskStatusEvent {
 
 export interface RiskHooks {
   /** Позиция срезана до потолка объёма. */
-  onPositionCapped?(info: { symbol: string; positionSide: PositionSide; excessQty: number; cap: number }): void;
+  onPositionCapped?(info: {
+    symbol: string;
+    positionSide: PositionSide;
+    excessQty: number;
+    /** Сколько остаётся в позиции после срезки — это человеку и важно знать. */
+    remainingQty: number;
+    cap: number;
+    executed: boolean;
+  }): void;
   /** Выставлен стоп (дефолтный, восстановленный или подтянутый по риску). */
   onStopPlaced?(info: {
     symbol: string;
@@ -181,6 +189,14 @@ export class RiskGuard {
   private readonly notOwnReported = new Set<PositionKey>();
   /** Отпечаток последней оценки риска — чтобы заметить сдвиг стопа. */
   private readonly riskFingerprint = new Map<PositionKey, string>();
+  /**
+   * Размер позиции, уже проверенный лимитом объёма (по поколению позиции).
+   *
+   * Лимит проверяется заново только когда позиция ВЫРОСЛА. Иначе движение цены
+   * само по себе снова и снова выводило бы номинал за потолок, и одна позиция
+   * срезалась бы по кусочку раз за разом.
+   */
+  private readonly capApprovedQty = new Map<PositionKey, { generation: number; qty: number }>();
   /** Начатые, но не завершённые проверки — чтобы их можно было дождаться. */
   private readonly pendingWork = new Set<Promise<unknown>>();
 
@@ -459,6 +475,7 @@ export class RiskGuard {
     this.defaultStopArmed.delete(key);
     this.notOwnReported.delete(key);
     this.riskFingerprint.delete(key);
+    this.capApprovedQty.delete(key);
     const timer = this.stopTimers.get(key);
     if (timer) {
       clearTimeout(timer);
@@ -471,6 +488,17 @@ export class RiskGuard {
   private async enforcePositionCap(symbol: string, positionSide: PositionSide): Promise<void> {
     const pos = this.opts.positions.peek(symbol, positionSide);
     if (!pos || isZero(pos.qty)) return;
+    if (pos.entryPrice <= 0) return;
+
+    const key = positionKey(symbol, positionSide);
+    const generation = pos.openedAtMs ?? 0;
+    const abs = Math.abs(pos.qty);
+
+    // Этот размер уже проверяли — правило про объём срабатывает на РОСТ позиции,
+    // а не на дыхание её рыночной стоимости.
+    const approved = this.capApprovedQty.get(key);
+    if (approved && approved.generation === generation && abs <= approved.qty * (1 + 1e-9)) return;
+    this.capApprovedQty.set(key, { generation, qty: abs });
 
     const [balance, filters] = await Promise.all([
       this.walletBalance(),
@@ -478,10 +506,14 @@ export class RiskGuard {
     ]);
     if (balance <= 0) return;
 
-    // Цена: сначала mark price, при недоступности — средняя входа. Ошибиться в
-    // меньшую сторону не страшно, в большую — привело бы к лишней срезке.
-    const price = await this.priceFor(symbol, pos.entryPrice);
-    const cap = positionCap(pos.qty, price, balance, this.cfg.maxPositionLeverage, filters?.stepSize ?? 0);
+    // Номинал считается по СРЕДНЕЙ ЦЕНЕ ВХОДА, а не по текущей.
+    //
+    // Правило ограничивает объём, который человек набрал, а не рыночную оценку
+    // этого объёма. По текущей цене номинал плавает сам по себе, и позиция
+    // срезалась бы снова и снова по мере движения рынка — по кусочку, с комиссией
+    // и проскальзыванием на каждом. Так и происходило до 2026-08-19: одна позиция
+    // получила четыре срезки за две с половиной минуты.
+    const cap = positionCap(pos.qty, pos.entryPrice, balance, this.cfg.maxPositionLeverage, filters?.stepSize ?? 0);
     if (cap.excessQty <= 0) return;
 
     if (!this.opts.limiter.allow(this.now())) {
@@ -492,12 +524,13 @@ export class RiskGuard {
     this.log.warn('объём позиции выше потолка — срезаю разницу по рынку', {
       symbol,
       positionSide,
-      объём: round8(Math.abs(pos.qty)),
-      номинал: round8(cap.notional),
+      объём: round8(abs),
+      номиналПоВходу: round8(cap.notional),
       потолок: round8(cap.maxNotional),
       депозит: round8(balance),
       плечо: this.cfg.maxPositionLeverage,
       срезать: round8(cap.excessQty),
+      останется: round8(cap.targetQty),
     });
 
     const outcome = await this.opts.executor.execute({
@@ -510,13 +543,21 @@ export class RiskGuard {
       triggers: [],
     });
 
+    // Отметка остаётся на ПРОВЕРЕННОМ размере (`abs`), а не на целевом. Так
+    // правило срабатывает ровно один раз на каждый набранный объём: после
+    // срезки позиция меньше отметки, и повторно оно включится, только если
+    // человек доберёт сверх того, что уже было оценено.
     if (outcome.executed) this.cappedCount++;
     else this.opts.limiter.refund(this.now());
+
+    const cut = outcome.sentQty ?? cap.excessQty;
     this.hooks.onPositionCapped?.({
       symbol,
       positionSide,
-      excessQty: outcome.sentQty ?? cap.excessQty,
+      excessQty: cut,
+      remainingQty: round8(Math.max(0, abs - (outcome.executed ? cut : 0))),
       cap: cap.maxNotional,
+      executed: outcome.executed,
     });
   }
 
