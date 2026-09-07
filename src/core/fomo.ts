@@ -40,6 +40,14 @@ export interface ClosedTrade {
   durationMs: number | null;
   /** Позиция закрыта стоп-ордером (или ликвидацией), а не руками и не по тейку. */
   byStop: boolean;
+  /**
+   * Позиция закрыта тейк-профитом.
+   *
+   * Признак осознанности, а не паники: стоп терминал иногда ставит сам, а тейк
+   * автоматически появляется только в прибыли. Если он сработал в убыток —
+   * значит человек его туда сдвинул руками, понимая последствия.
+   */
+  byTakeProfit: boolean;
   /** Результат сделки в валюте котировки, без комиссии. Минус — убыток. */
   pnl: number;
   /** Номинал позиции на момент закрытия — база для относительного порога. */
@@ -184,11 +192,17 @@ export class FomoDetector {
    * этом состоянии столько же раз закрывает руками, поймав очередной минус.
    * Окно меряется по времени ОТКРЫТИЯ — суть признака в кучности входов, а не
    * в том, когда позиции доехали до выхода.
+   *
+   * Единственное исключение — тейк-профит. Стоп терминал иногда выставляет
+   * сам, поэтому закрытие по нему о намерениях человека не говорит ничего.
+   * Тейк же автоматически ставится только в прибыль: если он сработал в
+   * убыток, человек сдвинул его туда сознательно. Это уже решение, а не FOMO.
    */
   private recordBurst(trade: ClosedTrade, loss: boolean, known: boolean): ClosedTrade[] | null {
     const need = Math.floor(this.params.burstCount);
     if (need <= 0) return null;
     if (!loss || !known) return null;
+    if (trade.byTakeProfit) return null;
 
     this.losses.push(trade);
 
@@ -242,4 +256,11 @@ const STOP_CLOSE_TYPES = new Set([
 
 export function isStopCloseType(origType: string): boolean {
   return STOP_CLOSE_TYPES.has(origType);
+}
+
+/** Типы ордеров, закрытие которыми считается взятием тейк-профита. */
+const TAKE_PROFIT_CLOSE_TYPES = new Set(['TAKE_PROFIT', 'TAKE_PROFIT_MARKET']);
+
+export function isTakeProfitCloseType(origType: string): boolean {
+  return TAKE_PROFIT_CLOSE_TYPES.has(origType);
 }

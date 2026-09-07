@@ -163,6 +163,23 @@ legend { color: var(--muted); font-size: 11.5px; text-transform: uppercase; lett
 .field:last-child { margin-bottom: 0; }
 .field label { color: var(--ink-2); font-size: 13px; }
 .desc { color: var(--muted); font-size: 11.5px; margin: -4px 0 10px 220px; }
+
+/*
+ * Подгруппа внутри секции: два признака защиты от FOMO настраиваются
+ * по-разному, и человек должен видеть, какое поле к какому относится.
+ * Отбивка слева и заголовок дешевле, чем две отдельные секции: правила остаются
+ * одним целым, каким они и являются.
+ */
+.subgroup { border-left: 2px solid var(--grid); padding-left: 12px; margin: 10px 0 16px; }
+.subgroup:last-child { margin-bottom: 0; }
+.subhead {
+  color: var(--ink-2); font-size: 12px; font-weight: 600;
+  letter-spacing: 0.2px; margin: 0 0 8px;
+}
+.subhead small {
+  display: block; color: var(--muted); font-size: 11.5px;
+  font-weight: 400; letter-spacing: 0; margin-top: 3px;
+}
 input[type='text'], input[type='password'], input[type='number'], select {
   background: #111110; color: var(--ink); border: 1px solid var(--border);
   border-radius: 7px; padding: 6px 9px; font-size: 13px; font-family: inherit; width: 100%;

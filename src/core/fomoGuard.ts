@@ -100,6 +100,9 @@ const STOP_TRIGGER_GRACE_MS = 4000;
 /** Типы условных ордеров, срабатывание которых означает стоп-аут. */
 const TRIGGERED_STOP_TYPES = new Set(['STOP_MARKET', 'STOP', 'TRAILING_STOP_MARKET']);
 
+/** Типы условных ордеров, срабатывание которых означает взятие тейк-профита. */
+const TRIGGERED_TP_TYPES = new Set(['TAKE_PROFIT', 'TAKE_PROFIT_MARKET']);
+
 export class FomoGuard {
   private readonly cfg: Config;
   private readonly log: Logger;
@@ -109,6 +112,8 @@ export class FomoGuard {
 
   /** Когда по этой позиции в последний раз сработал стоп. */
   private readonly stopTriggeredAt = new Map<PositionKey, number>();
+  /** Когда по этой позиции в последний раз сработал тейк-профит. */
+  private readonly tpTriggeredAt = new Map<PositionKey, number>();
   /** Позиции, по которым прямо сейчас идёт принудительное закрытие. */
   private readonly closing = new Set<PositionKey>();
   /** Ордера, отмену которых мы уже отправили. */
@@ -184,8 +189,13 @@ export class FomoGuard {
     if (this.stopped || !this.active) return;
     const order = evt.order;
 
-    if (evt.orderStatus === 'TRIGGERED' && TRIGGERED_STOP_TYPES.has(order.origType)) {
-      this.stopTriggeredAt.set(positionKey(order.symbol, order.positionSide), this.now());
+    if (evt.orderStatus === 'TRIGGERED') {
+      const key = positionKey(order.symbol, order.positionSide);
+      if (TRIGGERED_STOP_TYPES.has(order.origType)) this.stopTriggeredAt.set(key, this.now());
+      // Тейк опознаётся тем же способом и по той же причине: сработавший
+      // условный ордер порождает обычный, и в исполнении по нему тип придёт
+      // уже как MARKET.
+      if (TRIGGERED_TP_TYPES.has(order.origType)) this.tpTriggeredAt.set(key, this.now());
     }
 
     if (isTerminalStatus(evt.orderStatus)) {
@@ -235,17 +245,23 @@ export class FomoGuard {
       (triggeredAt !== undefined && trade.closedAtMs - triggeredAt <= STOP_TRIGGER_GRACE_MS);
     this.stopTriggeredAt.delete(key);
 
+    const tpAt = this.tpTriggeredAt.get(key);
+    const byTakeProfit =
+      trade.byTakeProfit || (tpAt !== undefined && trade.closedAtMs - tpAt <= STOP_TRIGGER_GRACE_MS);
+    this.tpTriggeredAt.delete(key);
+
     // Пока держится блокировка, закрытия не считаем. Закрывает их сейчас сама
     // программа, и своими же убытками она накрутила бы себе новое срабатывание
     // и продлила блокировку — на ровном месте, без участия человека.
     if (this.blocked()) return;
 
-    const outcome = this.detector.record({ ...trade, byStop });
+    const outcome = this.detector.record({ ...trade, byStop, byTakeProfit });
 
     this.log.debug('сделка закрыта, признаки FOMO пересчитаны', {
       symbol: trade.symbol,
       positionSide: trade.positionSide,
       поСтопу: byStop,
+      поТейку: byTakeProfit,
       результат: round8(trade.pnl),
       номинал: round8(trade.notional),
       порогУбытка: round8((trade.notional * this.cfg.fomoMinLossPct) / 100),

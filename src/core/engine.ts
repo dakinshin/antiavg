@@ -4,7 +4,7 @@ import { analyzeFill, analyzePendingOrder, SKIP_REASON_TEXT } from './detector.j
 import { ActionLimiter } from './actionLimiter.js';
 import { OrderRegistry } from './orderRegistry.js';
 import { PositionStore } from './positionStore.js';
-import { isStopCloseType } from './fomo.js';
+import { isStopCloseType, isTakeProfitCloseType } from './fomo.js';
 import { isZero, round8, sameSign } from '../util/num.js';
 import type { Logger } from '../util/logger.js';
 import { noopLogger } from '../util/logger.js';
@@ -62,12 +62,14 @@ export interface ClosedTradeInfo {
   symbol: string;
   positionSide: PositionSide;
   closedAtMs: number;
-  /** Сколько позиция прожила. null — время открытия не было известно. */
   /** Время открытия позиции, мс. null — было неизвестно. */
   openedAtMs: number | null;
+  /** Сколько позиция прожила. null — время открытия не было известно. */
   durationMs: number | null;
   /** Закрыта стоп-ордером (или ликвидацией). */
   byStop: boolean;
+  /** Закрыта тейк-профитом — признак осознанного выхода. */
+  byTakeProfit: boolean;
   /** Результат сделки в валюте котировки, без комиссии. Минус — убыток. */
   pnl: number;
   /** Номинал позиции на момент закрытия — база для относительных порогов. */
@@ -528,6 +530,8 @@ export class Engine {
         openedAtMs: known ? before.openedAtMs : null,
         durationMs: known ? Math.max(0, closedAtMs - before.openedAtMs!) : null,
         byStop: isStopCloseType(fill.origType) || isStopCloseType(order?.origType ?? ''),
+        byTakeProfit:
+          isTakeProfitCloseType(fill.origType) || isTakeProfitCloseType(order?.origType ?? ''),
         pnl: applied.realizedPnl,
         notional: Math.abs(before.qty) * before.entryPrice,
         fill,

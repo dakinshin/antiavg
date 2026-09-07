@@ -40,6 +40,7 @@ function trade(overrides: Partial<ClosedTrade> & { closedAtMs: number }): Closed
     positionSide: 'BOTH' as const,
     durationMs: 2000,
     byStop: true,
+    byTakeProfit: false,
     // Номинал 1000, убыток 5 — это 0.5%, заметно выше порога безубытка.
     pnl: -5,
     notional: 1000,
@@ -211,6 +212,17 @@ describe('FomoDetector: пачка убыточных входов', () => {
     expect(d.record(entry(20_000, { pnl: -0.1 })).triggered).toBe(false);
   });
 
+  it('закрытие по тейку в пачку не идёт', () => {
+    const d = new FomoDetector(BURST);
+    d.record(entry(0));
+    d.record(entry(10_000));
+    // Тейк автоматически ставится только в прибыль. Сработал в убыток —
+    // значит человек сдвинул его туда сам, понимая последствия.
+    expect(d.record(entry(20_000, { byStop: false, byTakeProfit: true })).triggered).toBe(false);
+    // И следующая обычная убыточная сделка достраивает пачку до трёх.
+    expect(d.record(entry(30_000)).triggered).toBe(true);
+  });
+
   it('давно закрытая пачка не выстреливает задним числом', () => {
     const d = new FomoDetector({ ...BURST, burstRetentionMs: 120_000 });
     d.record(entry(0));
@@ -322,7 +334,7 @@ function stopOut(
     openAt: number;
     closeAt: number;
     symbol?: string;
-    origType?: 'STOP_MARKET' | 'MARKET';
+    origType?: 'STOP_MARKET' | 'MARKET' | 'TAKE_PROFIT_MARKET';
     /** Цена выхода. По умолчанию 99 при входе по 100 — убыток 1%. */
     closePrice?: number;
   },
@@ -383,6 +395,74 @@ describe('FomoGuard: пачка убыточных входов', () => {
     await h.fomo.settle();
 
     expect(h.triggers).toHaveLength(1);
+  });
+
+  it('закрытия по тейку в пачку не идут', async () => {
+    const h = burstHarness();
+    stopOut(h, { openAt: 1_000, closeAt: 21_000, origType: 'TAKE_PROFIT_MARKET' });
+    stopOut(h, { openAt: 25_000, closeAt: 45_000, origType: 'TAKE_PROFIT_MARKET' });
+    stopOut(h, { openAt: 50_000, closeAt: 70_000, origType: 'TAKE_PROFIT_MARKET' });
+    await h.fomo.settle();
+
+    expect(h.triggers).toHaveLength(0);
+  });
+
+  it('алго-тейк опознаётся, даже если исполнение пришло как MARKET', async () => {
+    // Та же беда, что и со стопами: сработавший условный ордер порождает
+    // обычный, и в исполнении по нему тип приходит уже как MARKET. Без
+    // отдельного опознания исключение для тейка просто не работало бы.
+    const h = burstHarness();
+    const tpTriggered = (atMs: number): OrderLifecycleEvent => ({
+      eventTimeMs: atMs,
+      transactionTimeMs: atMs,
+      executionType: 'TRIGGERED',
+      orderStatus: 'TRIGGERED',
+      order: {
+        orderId: nextOrderId(),
+        clientOrderId: 'tp',
+        symbol: 'BTCUSDT',
+        side: 'SELL',
+        positionSide: 'BOTH',
+        type: 'TAKE_PROFIT_MARKET',
+        origType: 'TAKE_PROFIT_MARKET',
+        placedAtMs: atMs - 1000,
+        origQty: 0,
+        executedQty: 0,
+        price: 0,
+        stopPrice: 99,
+        reduceOnly: false,
+        closePosition: true,
+        own: false,
+        algo: true,
+      },
+    });
+
+    for (const [openAt, closeAt] of [
+      [1_000, 21_000],
+      [25_000, 45_000],
+      [50_000, 70_000],
+    ]) {
+      h.pump(
+        fillEvent({ orderId: nextOrderId(), side: 'BUY', lastQty: 1, lastPrice: 100, timeMs: openAt! }),
+      );
+      h.clock.set(closeAt! - 100);
+      h.fomo.onOrderEvent(tpTriggered(closeAt! - 100));
+      h.pump(
+        fillEvent({
+          orderId: nextOrderId(),
+          side: 'SELL',
+          lastQty: 1,
+          lastPrice: 99,
+          type: 'MARKET',
+          origType: 'MARKET',
+          reduceOnly: true,
+          timeMs: closeAt!,
+        }),
+      );
+    }
+    await h.fomo.settle();
+
+    expect(h.triggers).toHaveLength(0);
   });
 
   it('входы, разнесённые шире минуты, пачкой не считаются', async () => {
